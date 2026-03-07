@@ -49,8 +49,8 @@ The src/verifiable_intent/ module is a Rust-native reimplementation based on
 the Verifiable Intent open specification and reference implementation:
 
   Project:  Verifiable Intent (VI)
-  Author:   genereda
-  Source:   https://github.com/genereda/verifiable-intent
+  Author:   agent-intent
+  Source:   https://github.com/agent-intent/verifiable-intent
   License:  Apache License, Version 2.0
 
 This implementation follows the VI specification design (SD-JWT layered

@@ -7,8 +7,8 @@
 //! # Attribution
 //!
 //! This implementation is based on the Verifiable Intent open specification and
-//! reference implementation by genereda, available at
-//! <https://github.com/genereda/verifiable-intent>, licensed under the
+//! reference implementation by agent-intent, available at
+//! <https://github.com/agent-intent/verifiable-intent>, licensed under the
 //! Apache License, Version 2.0. This Rust-native reimplementation follows the
 //! VI specification design (SD-JWT layered credentials, constraint model,
 //! three-layer chain) without copying source code from the reference
