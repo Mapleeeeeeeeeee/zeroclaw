@@ -54,6 +54,7 @@ pub mod shell;
 pub mod traits;
 pub mod web_fetch;
 pub mod web_search_tool;
+pub mod xlsx_read;
 
 pub use browser::{BrowserTool, ComputerUseConfig};
 pub use browser_open::BrowserOpenTool;
@@ -96,6 +97,7 @@ pub use traits::Tool;
 pub use traits::{ToolResult, ToolSpec};
 pub use web_fetch::WebFetchTool;
 pub use web_search_tool::WebSearchTool;
+pub use xlsx_read::XlsxReadTool;
 
 use crate::config::{Config, DelegateAgentConfig};
 use crate::memory::Memory;
@@ -301,6 +303,9 @@ pub fn all_tools_with_runtime(
 
     // PDF extraction (feature-gated at compile time via rag-pdf)
     tool_arcs.push(Arc::new(PdfReadTool::new(security.clone())));
+
+    // XLSX text extraction
+    tool_arcs.push(Arc::new(XlsxReadTool::new(security.clone())));
 
     // Vision tools are always available
     tool_arcs.push(Arc::new(ScreenshotTool::new(security.clone())));
