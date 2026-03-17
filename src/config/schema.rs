@@ -3558,6 +3558,8 @@ pub struct ChannelsConfig {
     pub wecom: Option<WeComConfig>,
     /// QQ Official Bot channel configuration.
     pub qq: Option<QQConfig>,
+    /// LINE Messaging API channel configuration.
+    pub line: Option<LineConfig>,
     #[cfg(feature = "channel-nostr")]
     pub nostr: Option<NostrConfig>,
     /// ClawdTalk voice channel configuration.
@@ -3661,6 +3663,10 @@ impl ChannelsConfig {
                 Box::new(ConfigWrapper::new(self.qq.as_ref())),
                 self.qq.is_some()
             ),
+            (
+                Box::new(ConfigWrapper::new(self.line.as_ref())),
+                self.line.is_some(),
+            ),
             #[cfg(feature = "channel-nostr")]
             (
                 Box::new(ConfigWrapper::new(self.nostr.as_ref())),
@@ -3710,6 +3716,7 @@ impl Default for ChannelsConfig {
             dingtalk: None,
             wecom: None,
             qq: None,
+            line: None,
             #[cfg(feature = "channel-nostr")]
             nostr: None,
             clawdtalk: None,
@@ -4717,6 +4724,31 @@ pub struct QQConfig {
     /// Allowed user IDs. Empty = deny all, "*" = allow all
     #[serde(default)]
     pub allowed_users: Vec<String>,
+}
+
+/// LINE Messaging API channel configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct LineConfig {
+    /// Channel access token from LINE Developers console
+    pub channel_access_token: String,
+    /// Channel secret from LINE Developers console
+    pub channel_secret: String,
+    /// Webhook server port (default: 8443)
+    #[serde(default = "default_line_webhook_port")]
+    pub webhook_port: u16,
+    /// Allowed user IDs. Empty = deny all, "*" = allow all
+    #[serde(default)]
+    pub allowed_users: Vec<String>,
+    /// Allowed group IDs. Empty = deny all, "*" = allow all
+    #[serde(default)]
+    pub allowed_groups: Vec<String>,
+}
+
+fn default_line_webhook_port() -> u16 { 8443 }
+
+impl ChannelConfig for LineConfig {
+    fn name() -> &'static str { "LINE" }
+    fn desc() -> &'static str { "LINE Messaging API" }
 }
 
 impl ChannelConfig for QQConfig {
@@ -7383,6 +7415,7 @@ default_temperature = 0.7
                 dingtalk: None,
                 wecom: None,
                 qq: None,
+            line: None,
                 #[cfg(feature = "channel-nostr")]
                 nostr: None,
                 clawdtalk: None,
@@ -8116,6 +8149,7 @@ allowed_users = ["@ops:matrix.org"]
             dingtalk: None,
             wecom: None,
             qq: None,
+            line: None,
             nostr: None,
             clawdtalk: None,
             message_timeout_secs: 300,
@@ -8344,6 +8378,7 @@ channel_id = "C123"
             dingtalk: None,
             wecom: None,
             qq: None,
+            line: None,
             nostr: None,
             clawdtalk: None,
             message_timeout_secs: 300,

@@ -32,6 +32,7 @@ pub mod nextcloud_talk;
 pub mod nostr;
 pub mod notion;
 pub mod qq;
+pub mod line;
 pub mod session_store;
 pub mod signal;
 pub mod slack;
@@ -65,6 +66,7 @@ pub use nextcloud_talk::NextcloudTalkChannel;
 pub use nostr::NostrChannel;
 pub use notion::NotionChannel;
 pub use qq::QQChannel;
+pub use line::LineChannel;
 pub use signal::SignalChannel;
 pub use slack::SlackChannel;
 pub use telegram::TelegramChannel;
@@ -3077,7 +3079,8 @@ fn build_channel_by_id(config: &Config, channel_id: &str) -> Result<Arc<dyn Chan
                 .with_workspace_dir(config.workspace_dir.clone()),
             ))
         }
-        other => anyhow::bail!("Unknown channel '{other}'. Supported: telegram, discord, slack"),
+        "line" => {            let line_cfg = config                .channels_config                .line                .as_ref()                .context("LINE channel is not configured")?;            Ok(Arc::new(LineChannel::new(                line_cfg.channel_access_token.clone(),                line_cfg.channel_secret.clone(),                line_cfg.webhook_port,                line_cfg.allowed_users.clone(),                line_cfg.allowed_groups.clone(),                "小允子",                config.workspace_dir.to_string_lossy(),            )))        }
+        other => anyhow::bail!("Unknown channel '{other}'. Supported: telegram, discord, slack, line"),
     }
 }
 
@@ -3400,6 +3403,21 @@ fn collect_configured_channels(
                 qq.app_id.clone(),
                 qq.app_secret.clone(),
                 qq.allowed_users.clone(),
+            )),
+        });
+    }
+
+    if let Some(ref line_cfg) = config.channels_config.line {
+        channels.push(ConfiguredChannel {
+            display_name: "LINE",
+            channel: Arc::new(LineChannel::new(
+                line_cfg.channel_access_token.clone(),
+                line_cfg.channel_secret.clone(),
+                line_cfg.webhook_port,
+                line_cfg.allowed_users.clone(),
+                line_cfg.allowed_groups.clone(),
+                "小允子",
+                config.workspace_dir.to_string_lossy(),
             )),
         });
     }
