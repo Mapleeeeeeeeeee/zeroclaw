@@ -17,6 +17,7 @@
 
 pub mod backup_tool;
 pub mod browser;
+pub mod browser_delegate;
 pub mod browser_open;
 pub mod cli_discovery;
 pub mod cloud_ops;
@@ -36,6 +37,7 @@ pub mod file_read;
 pub mod file_write;
 pub mod git_operations;
 pub mod glob_search;
+pub mod google_workspace;
 #[cfg(feature = "hardware")]
 pub mod hardware_board_info;
 #[cfg(feature = "hardware")]
@@ -44,6 +46,9 @@ pub mod hardware_memory_map;
 pub mod hardware_memory_read;
 pub mod http_request;
 pub mod image_info;
+pub mod knowledge_tool;
+pub mod linkedin;
+pub mod linkedin_client;
 pub mod mcp_client;
 pub mod mcp_deferred;
 pub mod mcp_protocol;
@@ -75,6 +80,8 @@ pub mod workspace_tool;
 
 pub use backup_tool::BackupTool;
 pub use browser::{BrowserTool, ComputerUseConfig};
+#[allow(unused_imports)]
+pub use browser_delegate::{BrowserDelegateConfig, BrowserDelegateTool};
 pub use browser_open::BrowserOpenTool;
 pub use cloud_ops::CloudOpsTool;
 pub use cloud_patterns::CloudPatternsTool;
@@ -93,6 +100,7 @@ pub use file_read::FileReadTool;
 pub use file_write::FileWriteTool;
 pub use git_operations::GitOperationsTool;
 pub use glob_search::GlobSearchTool;
+pub use google_workspace::GoogleWorkspaceTool;
 #[cfg(feature = "hardware")]
 pub use hardware_board_info::HardwareBoardInfoTool;
 #[cfg(feature = "hardware")]
@@ -101,6 +109,8 @@ pub use hardware_memory_map::HardwareMemoryMapTool;
 pub use hardware_memory_read::HardwareMemoryReadTool;
 pub use http_request::HttpRequestTool;
 pub use image_info::ImageInfoTool;
+pub use knowledge_tool::KnowledgeTool;
+pub use linkedin::LinkedInTool;
 pub use mcp_client::McpRegistry;
 pub use mcp_deferred::{ActivatedToolSet, DeferredMcpToolSet};
 pub use mcp_tool::McpToolWrapper;
@@ -270,6 +280,7 @@ pub fn all_tools_with_runtime(
     fallback_api_key: Option<&str>,
     root_config: &crate::config::Config,
 ) -> (Vec<Box<dyn Tool>>, Option<DelegateParentToolsHandle>) {
+    let has_shell_access = runtime.has_shell_access();
     let mut tool_arcs: Vec<Arc<dyn Tool>> = vec![
         Arc::new(ShellTool::new(security.clone(), runtime)),
         Arc::new(FileReadTool::new(security.clone())),
@@ -327,6 +338,20 @@ pub fn all_tools_with_runtime(
                 max_coordinate_y: browser_config.computer_use.max_coordinate_y,
             },
         )));
+    }
+
+    // Browser delegation tool (conditionally registered; requires shell access)
+    if root_config.browser_delegate.enabled {
+        if has_shell_access {
+            tool_arcs.push(Arc::new(BrowserDelegateTool::new(
+                security.clone(),
+                root_config.browser_delegate.clone(),
+            )));
+        } else {
+            tracing::warn!(
+                "browser_delegate: skipped registration because the current runtime does not allow shell access"
+            );
+        }
     }
 
     if http_config.enabled {
@@ -415,12 +440,40 @@ pub fn all_tools_with_runtime(
         tool_arcs.push(Arc::new(CloudPatternsTool::new()));
     }
 
+    // Google Workspace CLI (gws) integration — requires shell access
+    if root_config.google_workspace.enabled && has_shell_access {
+        tool_arcs.push(Arc::new(GoogleWorkspaceTool::new(
+            security.clone(),
+            root_config.google_workspace.allowed_services.clone(),
+            root_config.google_workspace.credentials_path.clone(),
+            root_config.google_workspace.default_account.clone(),
+            root_config.google_workspace.rate_limit_per_minute,
+            root_config.google_workspace.timeout_secs,
+            root_config.google_workspace.audit_log,
+        )));
+    } else if root_config.google_workspace.enabled {
+        tracing::warn!(
+            "google_workspace: skipped registration because shell access is unavailable"
+        );
+    }
+
     // PDF extraction (feature-gated at compile time via rag-pdf)
     tool_arcs.push(Arc::new(PdfReadTool::new(security.clone())));
 
     // Vision tools are always available
     tool_arcs.push(Arc::new(ScreenshotTool::new(security.clone())));
     tool_arcs.push(Arc::new(ImageInfoTool::new(security.clone())));
+
+    // LinkedIn integration (config-gated)
+    if root_config.linkedin.enabled {
+        tool_arcs.push(Arc::new(LinkedInTool::new(
+            security.clone(),
+            workspace_dir.to_path_buf(),
+            root_config.linkedin.api_version.clone(),
+            root_config.linkedin.content.clone(),
+            root_config.linkedin.image.clone(),
+        )));
+    }
 
     if let Some(key) = composio_key {
         if !key.is_empty() {
@@ -487,6 +540,28 @@ pub fn all_tools_with_runtime(
         }
     }
 
+    // Knowledge graph tool
+    if root_config.knowledge.enabled {
+        let db_path_str = root_config.knowledge.db_path.replace(
+            '~',
+            &directories::UserDirs::new()
+                .map(|u| u.home_dir().to_string_lossy().to_string())
+                .unwrap_or_else(|| ".".to_string()),
+        );
+        let db_path = std::path::PathBuf::from(&db_path_str);
+        match crate::memory::knowledge_graph::KnowledgeGraph::new(
+            &db_path,
+            root_config.knowledge.max_nodes,
+        ) {
+            Ok(graph) => {
+                tool_arcs.push(Arc::new(KnowledgeTool::new(Arc::new(graph))));
+            }
+            Err(e) => {
+                tracing::warn!("knowledge graph disabled due to init error: {e}");
+            }
+        }
+    }
+
     // Add delegation tool when agents are configured
     let delegate_fallback_credential = fallback_api_key.and_then(|value| {
         let trimmed_value = value.trim();
@@ -501,6 +576,7 @@ pub fn all_tools_with_runtime(
             .map(std::path::PathBuf::from),
         secrets_encrypt: root_config.secrets.encrypt,
         reasoning_enabled: root_config.runtime.reasoning_enabled,
+        reasoning_effort: root_config.runtime.reasoning_effort.clone(),
         provider_timeout_secs: Some(root_config.provider_timeout_secs),
         extra_headers: root_config.extra_headers.clone(),
         api_path: root_config.api_path.clone(),
@@ -556,6 +632,53 @@ pub fn all_tools_with_runtime(
             Arc::new(tokio::sync::RwLock::new(ws_manager)),
             security.clone(),
         )));
+    }
+
+    // ── WASM plugin tools (requires plugins-wasm feature) ──
+    #[cfg(feature = "plugins-wasm")]
+    {
+        let plugin_dir = config.plugins.plugins_dir.clone();
+        let plugin_path = if plugin_dir.starts_with("~/") {
+            let home = directories::UserDirs::new()
+                .map(|u| u.home_dir().to_path_buf())
+                .unwrap_or_else(|| std::path::PathBuf::from("."));
+            home.join(&plugin_dir[2..])
+        } else {
+            std::path::PathBuf::from(&plugin_dir)
+        };
+
+        if plugin_path.exists() && config.plugins.enabled {
+            match crate::plugins::host::PluginHost::new(
+                plugin_path.parent().unwrap_or(&plugin_path),
+            ) {
+                Ok(host) => {
+                    let tool_manifests = host.tool_plugins();
+                    let count = tool_manifests.len();
+                    for manifest in tool_manifests {
+                        tool_arcs.push(Arc::new(crate::plugins::wasm_tool::WasmTool::new(
+                            manifest.name.clone(),
+                            manifest.description.clone().unwrap_or_default(),
+                            manifest.name.clone(),
+                            "call".to_string(),
+                            serde_json::json!({
+                                "type": "object",
+                                "properties": {
+                                    "input": {
+                                        "type": "string",
+                                        "description": "Input for the plugin"
+                                    }
+                                },
+                                "required": ["input"]
+                            }),
+                        )));
+                    }
+                    tracing::info!("Loaded {count} WASM plugin tools");
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to load WASM plugins: {e}");
+                }
+            }
+        }
     }
 
     (boxed_registry_from_arcs(tool_arcs), delegate_handle)

@@ -116,6 +116,15 @@ impl HookRunner {
         join_all(futs).await;
     }
 
+    pub async fn fire_callback_query(&self, callback_data: &str, chat_id: &str, message_id: i64) {
+        let futs: Vec<_> = self
+            .handlers
+            .iter()
+            .map(|h| h.on_callback_query(callback_data, chat_id, message_id))
+            .collect();
+        join_all(futs).await;
+    }
+
     // ---------------------------------------------------------------
     // Modifying dispatchers (sequential by priority, short-circuit on Cancel)
     // ---------------------------------------------------------------

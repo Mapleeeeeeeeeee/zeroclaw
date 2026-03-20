@@ -76,6 +76,7 @@ mod tests {
                 recipient: "user".into(),
                 subject: None,
                 thread_ts: None,
+                reply_markup: None,
             })
             .await;
         assert!(result.is_ok());
@@ -90,6 +91,7 @@ mod tests {
                 recipient: String::new(),
                 subject: None,
                 thread_ts: None,
+                reply_markup: None,
             })
             .await;
         assert!(result.is_ok());

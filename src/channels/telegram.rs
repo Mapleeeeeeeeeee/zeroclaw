@@ -334,6 +334,13 @@ pub struct TelegramChannel {
     workspace_dir: Option<std::path::PathBuf>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EditMessageResult {
+    Success,
+    NotModified,
+    Failed(reqwest::StatusCode),
+}
+
 impl TelegramChannel {
     pub fn new(bot_token: String, allowed_users: Vec<String>, mention_only: bool) -> Self {
         let normalized_allowed = Self::normalize_allowed_users(allowed_users);
@@ -540,6 +547,20 @@ impl TelegramChannel {
         format!("{}/bot{}/{method}", self.api_base, self.bot_token)
     }
 
+    async fn classify_edit_message_response(resp: reqwest::Response) -> EditMessageResult {
+        if resp.status().is_success() {
+            return EditMessageResult::Success;
+        }
+
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        if body.contains("message is not modified") {
+            return EditMessageResult::NotModified;
+        }
+
+        EditMessageResult::Failed(status)
+    }
+
     async fn fetch_bot_username(&self) -> anyhow::Result<String> {
         let resp = self.http_client().get(self.api_url("getMe")).send().await?;
 
@@ -730,7 +751,7 @@ impl TelegramChannel {
 
                         if let Some(identity) = bind_identity {
                             self.add_allowed_identity_runtime(&identity);
-                            match self.persist_allowed_identity(&identity).await {
+                            match Box::pin(self.persist_allowed_identity(&identity)).await {
                                 Ok(()) => {
                                     let _ = self
                                         .send(&SendMessage::new(
@@ -1536,6 +1557,7 @@ Allowlist Telegram username (without '@') or numeric user ID.",
         message: &str,
         chat_id: &str,
         thread_id: Option<&str>,
+        reply_markup: Option<&serde_json::Value>,
     ) -> anyhow::Result<()> {
         let chunks = split_message_for_telegram(message);
 
@@ -1561,6 +1583,13 @@ Allowlist Telegram username (without '@') or numeric user ID.",
             // Add message_thread_id for forum topic support
             if let Some(tid) = thread_id {
                 markdown_body["message_thread_id"] = serde_json::Value::String(tid.to_string());
+            }
+
+            // Add reply_markup (inline keyboard etc.) on last chunk only
+            if let Some(markup) = reply_markup {
+                if index == chunks.len() - 1 {
+                    markdown_body["reply_markup"] = markup.clone();
+                }
             }
 
             let markdown_resp = self
@@ -1707,7 +1736,7 @@ Allowlist Telegram username (without '@') or numeric user ID.",
                     TelegramAttachmentKind::Voice => "Voice",
                 };
                 let fallback_text = format!("{kind_label}: {target}");
-                self.send_text_chunks(&fallback_text, chat_id, thread_id)
+                self.send_text_chunks(&fallback_text, chat_id, thread_id, None)
                     .await?;
             }
 
@@ -2320,7 +2349,7 @@ impl Channel for TelegramChannel {
 
             // Send text without markers
             if !text_without_markers.is_empty() {
-                self.send_text_chunks(&text_without_markers, &chat_id, thread_id.as_deref())
+                self.send_text_chunks(&text_without_markers, &chat_id, thread_id.as_deref(), None)
                     .await?;
             }
 
@@ -2349,13 +2378,13 @@ impl Channel for TelegramChannel {
 
             // Fall back to chunked send
             return self
-                .send_text_chunks(text, &chat_id, thread_id.as_deref())
+                .send_text_chunks(text, &chat_id, thread_id.as_deref(), None)
                 .await;
         }
 
         let Some(id) = msg_id else {
             return self
-                .send_text_chunks(text, &chat_id, thread_id.as_deref())
+                .send_text_chunks(text, &chat_id, thread_id.as_deref(), None)
                 .await;
         };
 
@@ -2374,11 +2403,17 @@ impl Channel for TelegramChannel {
             .send()
             .await?;
 
-        if resp.status().is_success() {
-            return Ok(());
+        match Self::classify_edit_message_response(resp).await {
+            EditMessageResult::Success | EditMessageResult::NotModified => return Ok(()),
+            EditMessageResult::Failed(status) => {
+                tracing::debug!(
+                    status = ?status,
+                    "Telegram finalize_draft HTML edit failed; retrying without parse_mode"
+                );
+            }
         }
 
-        // Markdown failed — retry without parse_mode
+        // HTML failed — retry without parse_mode
         let plain_body = serde_json::json!({
             "chat_id": chat_id,
             "message_id": id,
@@ -2392,14 +2427,45 @@ impl Channel for TelegramChannel {
             .send()
             .await?;
 
-        if resp.status().is_success() {
-            return Ok(());
+        match Self::classify_edit_message_response(resp).await {
+            EditMessageResult::Success | EditMessageResult::NotModified => return Ok(()),
+            EditMessageResult::Failed(status) => {
+                tracing::warn!(
+                    status = ?status,
+                    "Telegram finalize_draft plain edit failed; attempting delete+send fallback"
+                );
+            }
         }
 
-        // Edit failed entirely — fall back to new message
-        tracing::warn!("Telegram finalize_draft edit failed; falling back to sendMessage");
-        self.send_text_chunks(text, &chat_id, thread_id.as_deref())
-            .await
+        let delete_resp = self
+            .client
+            .post(self.api_url("deleteMessage"))
+            .json(&serde_json::json!({
+                "chat_id": chat_id,
+                "message_id": id,
+            }))
+            .send()
+            .await;
+
+        match delete_resp {
+            Ok(resp) if resp.status().is_success() => {
+                self.send_text_chunks(text, &chat_id, thread_id.as_deref(), None)
+                    .await
+            }
+            Ok(resp) => {
+                tracing::warn!(
+                    status = ?resp.status(),
+                    "Telegram finalize_draft delete failed; skipping sendMessage to avoid duplicate"
+                );
+                Ok(())
+            }
+            Err(err) => {
+                tracing::warn!(
+                    "Telegram finalize_draft delete request failed: {err}; skipping sendMessage to avoid duplicate"
+                );
+                Ok(())
+            }
+        }
     }
 
     async fn cancel_draft(&self, recipient: &str, message_id: &str) -> anyhow::Result<()> {
@@ -2447,7 +2513,7 @@ impl Channel for TelegramChannel {
 
         if !attachments.is_empty() {
             if !text_without_markers.is_empty() {
-                self.send_text_chunks(&text_without_markers, chat_id, thread_id)
+                self.send_text_chunks(&text_without_markers, chat_id, thread_id, None)
                     .await?;
             }
 
@@ -2464,7 +2530,7 @@ impl Channel for TelegramChannel {
             return Ok(());
         }
 
-        self.send_text_chunks(&content, chat_id, thread_id).await
+        self.send_text_chunks(&content, chat_id, thread_id, None).await
     }
 
     async fn listen(&self, tx: tokio::sync::mpsc::Sender<ChannelMessage>) -> anyhow::Result<()> {
@@ -2486,7 +2552,7 @@ impl Channel for TelegramChannel {
             let probe = serde_json::json!({
                 "offset": offset,
                 "timeout": 0,
-                "allowed_updates": ["message"]
+                "allowed_updates": ["message", "callback_query"]
             });
             match self.http_client().post(&url).json(&probe).send().await {
                 Err(e) => {
@@ -2559,7 +2625,7 @@ impl Channel for TelegramChannel {
             let body = serde_json::json!({
                 "offset": offset,
                 "timeout": 30,
-                "allowed_updates": ["message"]
+                "allowed_updates": ["message", "callback_query"]
             });
 
             let resp = match self.http_client().post(&url).json(&body).send().await {
@@ -2620,6 +2686,50 @@ Ensure only one `zeroclaw` process is using this bot token."
                         offset = uid + 1;
                     }
 
+                    // Handle callback_query (inline button presses)
+                    if let Some(callback_query) = update.get("callback_query") {
+                        let callback_data = callback_query.get("data")
+                            .and_then(|d| d.as_str())
+                            .unwrap_or("");
+                        let callback_query_id = callback_query.get("id")
+                            .and_then(|d| d.as_str())
+                            .unwrap_or("");
+                        let chat_id = callback_query
+                            .pointer("/message/chat/id")
+                            .and_then(|v| v.as_i64())
+                            .map(|id| id.to_string())
+                            .unwrap_or_default();
+                        let message_id = callback_query
+                            .pointer("/message/message_id")
+                            .and_then(|v| v.as_i64())
+                            .unwrap_or(0);
+
+                        // Answer callback query immediately to dismiss spinner
+                        let answer_body = serde_json::json!({ "callback_query_id": callback_query_id });
+                        let _ = self.http_client().post(self.api_url("answerCallbackQuery"))
+                            .json(&answer_body).send().await;
+
+                        // Route as a special ChannelMessage with __callback: prefix
+                        if !callback_data.is_empty() && !chat_id.is_empty() {
+                            let callback_msg = crate::channels::traits::ChannelMessage {
+                                id: format!("callback:{}", callback_query_id),
+                                sender: chat_id.clone(),
+                                reply_target: chat_id.clone(),
+                                content: format!("__callback:{}:{}", message_id, callback_data),
+                                channel: "telegram".to_string(),
+                                timestamp: std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_secs(),
+                                thread_ts: None,
+                            };
+                            if tx.send(callback_msg).await.is_err() {
+                                return Ok(());
+                            }
+                        }
+                        continue;
+                    }
+
                     let msg = if let Some(m) = self.parse_update_message(update) {
                         m
                     } else if let Some(m) = self.try_parse_voice_message(update).await {
@@ -2627,7 +2737,7 @@ Ensure only one `zeroclaw` process is using this bot token."
                     } else if let Some(m) = self.try_parse_attachment_message(update).await {
                         m
                     } else {
-                        self.handle_unauthorized_message(update).await;
+                        Box::pin(self.handle_unauthorized_message(update)).await;
                         continue;
                     };
 

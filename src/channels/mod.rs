@@ -14,6 +14,7 @@
 //! To add a new channel, implement [`Channel`] in a new submodule and wire it into
 //! [`start_channels`]. See `AGENTS.md` §7.2 for the full change playbook.
 
+pub mod bluesky;
 pub mod clawdtalk;
 pub mod cli;
 pub mod dingtalk;
@@ -27,12 +28,16 @@ pub mod linq;
 #[cfg(feature = "channel-matrix")]
 pub mod matrix;
 pub mod mattermost;
+pub mod mochat;
 pub mod nextcloud_talk;
 #[cfg(feature = "channel-nostr")]
 pub mod nostr;
 pub mod notion;
 pub mod qq;
 pub mod line;
+pub mod reddit;
+pub mod session_backend;
+pub mod session_sqlite;
 pub mod session_store;
 pub mod signal;
 pub mod slack;
@@ -40,7 +45,9 @@ pub mod telegram;
 pub mod traits;
 pub mod transcription;
 pub mod tts;
+pub mod twitter;
 pub mod wati;
+pub mod webhook;
 pub mod wecom;
 pub mod whatsapp;
 #[cfg(feature = "whatsapp-web")]
@@ -48,6 +55,7 @@ pub mod whatsapp_storage;
 #[cfg(feature = "whatsapp-web")]
 pub mod whatsapp_web;
 
+pub use bluesky::BlueskyChannel;
 pub use clawdtalk::{ClawdTalkChannel, ClawdTalkConfig};
 pub use cli::CliChannel;
 pub use dingtalk::DingTalkChannel;
@@ -61,19 +69,23 @@ pub use linq::LinqChannel;
 #[cfg(feature = "channel-matrix")]
 pub use matrix::MatrixChannel;
 pub use mattermost::MattermostChannel;
+pub use mochat::MochatChannel;
 pub use nextcloud_talk::NextcloudTalkChannel;
 #[cfg(feature = "channel-nostr")]
 pub use nostr::NostrChannel;
 pub use notion::NotionChannel;
 pub use qq::QQChannel;
 pub use line::LineChannel;
+pub use reddit::RedditChannel;
 pub use signal::SignalChannel;
 pub use slack::SlackChannel;
 pub use telegram::TelegramChannel;
 pub use traits::{Channel, SendMessage};
 #[allow(unused_imports)]
 pub use tts::{TtsManager, TtsProvider};
+pub use twitter::TwitterChannel;
 pub use wati::WatiChannel;
+pub use webhook::WebhookChannel;
 pub use wecom::WeComChannel;
 pub use whatsapp::WhatsAppChannel;
 #[cfg(feature = "whatsapp-web")]
@@ -325,6 +337,7 @@ struct ChannelRuntimeContext {
     /// `[autonomy]` config; auto-denies tools that would need interactive
     /// approval since no operator is present on channel runs.
     approval_manager: Arc<ApprovalManager>,
+    activated_tools: Option<std::sync::Arc<std::sync::Mutex<crate::tools::ActivatedToolSet>>>,
 }
 
 #[derive(Clone)]
@@ -841,9 +854,17 @@ async fn maybe_apply_runtime_config_update(ctx: &ChannelRuntimeContext) -> Resul
     let next_default_provider: Arc<dyn Provider> = Arc::from(next_default_provider);
 
     if let Err(err) = next_default_provider.warmup().await {
+        if crate::providers::reliable::is_non_retryable(&err) {
+            tracing::warn!(
+                provider = %next_defaults.default_provider,
+                model = %next_defaults.model,
+                "Rejecting config reload: model not available (non-retryable): {err}"
+            );
+            return Ok(());
+        }
         tracing::warn!(
             provider = %next_defaults.default_provider,
-            "Provider warmup failed after config reload: {err}"
+            "Provider warmup failed after config reload (retryable, applying anyway): {err}"
         );
     }
 
@@ -1020,11 +1041,24 @@ fn rollback_orphan_user_turn(
     if turns.is_empty() {
         histories.remove(sender_key);
     }
+
+    // Also remove the orphan turn from the persisted JSONL session store so
+    // it doesn't resurface after a daemon restart (fixes #3674).
+    if let Some(ref store) = ctx.session_store {
+        if let Err(e) = store.remove_last(sender_key) {
+            tracing::warn!("Failed to rollback session store entry: {e}");
+        }
+    }
+
     true
 }
 
 fn should_skip_memory_context_entry(key: &str, content: &str) -> bool {
     if memory::is_assistant_autosave_key(key) {
+        return true;
+    }
+
+    if memory::should_skip_autosave_content(content) {
         return true;
     }
 
@@ -1319,10 +1353,11 @@ async fn build_memory_context(
     mem: &dyn Memory,
     user_msg: &str,
     min_relevance_score: f64,
+    session_id: Option<&str>,
 ) -> String {
     let mut context = String::new();
 
-    if let Ok(entries) = mem.recall(user_msg, 5, None).await {
+    if let Ok(entries) = mem.recall(user_msg, 5, session_id).await {
         let mut included = 0usize;
         let mut used_chars = 0usize;
 
@@ -1466,7 +1501,68 @@ fn sanitize_channel_response(response: &str, tools: &[Box<dyn Tool>]) -> String 
         .iter()
         .map(|tool| tool.name().to_ascii_lowercase())
         .collect();
-    strip_isolated_tool_json_artifacts(response, &known_tool_names)
+    // Strip XML-style tool-call tags (e.g. <tool_call>...</tool_call>)
+    let stripped_xml = strip_tool_call_tags(response);
+    // Strip isolated tool-call JSON artifacts
+    let stripped_json = strip_isolated_tool_json_artifacts(&stripped_xml, &known_tool_names);
+    // Strip leading narration lines that announce tool usage
+    strip_tool_narration(&stripped_json)
+}
+
+/// Remove leading lines that narrate tool usage (e.g. "Let me check the weather for you.").
+///
+/// Only strips lines from the very beginning of the message that match common
+/// narration patterns, so genuine content is preserved.
+fn strip_tool_narration(message: &str) -> String {
+    let narration_prefixes: &[&str] = &[
+        "let me ",
+        "i'll ",
+        "i will ",
+        "i am going to ",
+        "i'm going to ",
+        "searching ",
+        "looking up ",
+        "fetching ",
+        "checking ",
+        "using the ",
+        "using my ",
+        "one moment",
+        "hold on",
+        "just a moment",
+        "give me a moment",
+        "allow me to ",
+    ];
+
+    let mut result_lines: Vec<&str> = Vec::new();
+    let mut past_narration = false;
+
+    for line in message.lines() {
+        if past_narration {
+            result_lines.push(line);
+            continue;
+        }
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let lower = trimmed.to_lowercase();
+        if narration_prefixes.iter().any(|p| lower.starts_with(p)) {
+            // Skip this narration line
+            continue;
+        }
+        // First non-narration, non-empty line — keep everything from here
+        past_narration = true;
+        result_lines.push(line);
+    }
+
+    let joined = result_lines.join("\n");
+    let trimmed = joined.trim();
+    if trimmed.is_empty() && !message.trim().is_empty() {
+        // If stripping removed everything, return original to avoid empty reply
+        message.to_string()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 fn is_tool_call_payload(value: &serde_json::Value, known_tool_names: &HashSet<String>) -> bool {
@@ -1775,6 +1871,29 @@ async fn process_channel_message(
         }),
     );
 
+    // ── Intercept callback_query messages from Telegram ────────────
+    if msg.content.starts_with("__callback:") {
+        if let Some(hooks) = &ctx.hooks {
+            // Parse: __callback:{message_id}:{callback_data}
+            let parts: Vec<&str> = msg.content.splitn(3, ':').collect();
+            if parts.len() == 3 {
+                let message_id = parts[1].parse::<i64>().unwrap_or(0);
+                let callback_data = parts[2];
+                let chat_id = &msg.reply_target;
+                hooks.fire_callback_query(callback_data, chat_id, message_id).await;
+            }
+        }
+        return; // Don't pass callback messages to the agent pipeline
+    }
+
+    // ── Intercept silent messages (group non-mention, added to history only) ────────────
+    if msg.content.starts_with("__silent:") {
+        let real_content = msg.content["__silent:".len()..].to_string();
+        let history_key = conversation_history_key(&msg);
+        append_sender_turn(ctx.as_ref(), &history_key, crate::providers::traits::ChatMessage::user(&real_content));
+        return; // Don't trigger AI response
+    }
+
     // ── Hook: on_message_received (modifying) ────────────
     let mut msg = if let Some(hooks) = &ctx.hooks {
         match hooks.run_on_message_received(msg).await {
@@ -1788,7 +1907,17 @@ async fn process_channel_message(
         msg
     };
 
-    let target_channel = ctx.channels_by_name.get(&msg.channel).cloned();
+    let target_channel = ctx
+        .channels_by_name
+        .get(&msg.channel)
+        .or_else(|| {
+            // Multi-room channels use "name:qualifier" format (e.g. "matrix:!roomId");
+            // fall back to base channel name for routing.
+            msg.channel
+                .split_once(':')
+                .and_then(|(base, _)| ctx.channels_by_name.get(base))
+        })
+        .cloned();
     if let Err(err) = maybe_apply_runtime_config_update(ctx.as_ref()).await {
         tracing::warn!("Failed to apply runtime config update: {err}");
     }
@@ -1842,7 +1971,10 @@ async fn process_channel_message(
             return;
         }
     };
-    if ctx.auto_save_memory && msg.content.chars().count() >= AUTOSAVE_MIN_MESSAGE_CHARS {
+    if ctx.auto_save_memory
+        && msg.content.chars().count() >= AUTOSAVE_MIN_MESSAGE_CHARS
+        && !memory::should_skip_autosave_content(&msg.content)
+    {
         let autosave_key = conversation_memory_key(&msg);
         let _ = ctx
             .memory
@@ -1850,7 +1982,7 @@ async fn process_channel_message(
                 &autosave_key,
                 &msg.content,
                 crate::memory::MemoryCategory::Conversation,
-                None,
+                Some(&history_key),
             )
             .await;
     }
@@ -1887,6 +2019,29 @@ async fn process_channel_message(
         }
     }
 
+    // Strip [IMAGE:] markers from *older* history messages when the active
+    // provider does not support vision. This prevents "history poisoning"
+    // where a previously-sent image marker gets reloaded from the JSONL
+    // session file and permanently breaks the conversation (fixes #3674).
+    // We skip the last turn (the current message) so the vision check can
+    // still reject fresh image sends with a proper error.
+    if !active_provider.supports_vision() && prior_turns.len() > 1 {
+        let last_idx = prior_turns.len() - 1;
+        for turn in &mut prior_turns[..last_idx] {
+            if turn.content.contains("[IMAGE:") {
+                let (cleaned, _refs) = crate::multimodal::parse_image_markers(&turn.content);
+                turn.content = cleaned;
+            }
+        }
+        // Drop older turns that became empty after marker removal (e.g. image-only messages).
+        // Keep the last turn (current message) intact.
+        let current = prior_turns.pop();
+        prior_turns.retain(|turn| !turn.content.trim().is_empty());
+        if let Some(current) = current {
+            prior_turns.push(current);
+        }
+    }
+
     // Proactively trim conversation history before sending to the provider
     // to prevent context-window-exceeded errors (bug #3460).
     let dropped = proactive_trim_turns(&mut prior_turns, PROACTIVE_CONTEXT_BUDGET_CHARS);
@@ -1903,8 +2058,13 @@ async fn process_channel_message(
     // Only enrich with memory context when there is no prior conversation
     // history. Follow-up turns already include context from previous messages.
     if !had_prior_history {
-        let memory_context =
-            build_memory_context(ctx.memory.as_ref(), &msg.content, ctx.min_relevance_score).await;
+        let memory_context = build_memory_context(
+            ctx.memory.as_ref(),
+            &msg.content,
+            ctx.min_relevance_score,
+            Some(&history_key),
+        )
+        .await;
         if let Some(last_turn) = prior_turns.last_mut() {
             if last_turn.role == "user" && !memory_context.is_empty() {
                 last_turn.content = format!("{memory_context}{}", msg.content);
@@ -2073,6 +2233,7 @@ async fn process_channel_message(
                     ctx.non_cli_excluded_tools.as_ref()
                 },
                 ctx.tool_call_dedup_exempt.as_ref(),
+                ctx.activated_tools.as_ref(),
             ),
         ) => LlmExecutionResult::Completed(result),
     };
@@ -2622,6 +2783,17 @@ pub fn build_system_prompt_with_mode(
     use std::fmt::Write;
     let mut prompt = String::with_capacity(8192);
 
+    // ── 0. Anti-narration (top priority) ───────────────────────
+    prompt.push_str(
+        "## CRITICAL: No Tool Narration\n\n\
+         NEVER narrate, announce, describe, or explain your tool usage to the user. \
+         Do NOT say things like 'Let me check...', 'I will use http_request to...', \
+         'I'll fetch that for you', 'Searching now...', or 'Using the web_search tool'. \
+         The user must ONLY see the final answer. Tool calls are invisible infrastructure — \
+         never reference them. If you catch yourself starting a sentence about what tool \
+         you are about to use or just used, DELETE it and give the answer directly.\n\n",
+    );
+
     // ── 1. Tooling ──────────────────────────────────────────────
     if !tools.is_empty() {
         prompt.push_str("## Tools\n\n");
@@ -2761,7 +2933,9 @@ pub fn build_system_prompt_with_mode(
     prompt.push_str("- You are running as a messaging bot. Your response is automatically sent back to the user's channel.\n");
     prompt.push_str("- You do NOT need to ask permission to respond — just respond directly.\n");
     prompt.push_str("- NEVER repeat, describe, or echo credentials, tokens, API keys, or secrets in your responses.\n");
-    prompt.push_str("- If a tool output contains credentials, they have already been redacted — do not mention them.\n\n");
+    prompt.push_str("- If a tool output contains credentials, they have already been redacted — do not mention them.\n");
+    prompt.push_str("- When a user sends a voice note, it is automatically transcribed to text. Your text reply is automatically converted to a voice note and sent back. Do NOT attempt to generate audio yourself — TTS is handled by the channel.\n");
+    prompt.push_str("- NEVER narrate or describe your tool usage. Do NOT say 'Let me fetch...', 'I will use...', 'Searching...', or similar. Give the FINAL ANSWER only — no intermediate steps, no tool mentions, no progress updates.\n\n");
 
     if prompt.is_empty() {
         "You are ZeroClaw, a fast and efficient AI assistant built in Rust. Be helpful, concise, and direct."
@@ -3018,7 +3192,7 @@ pub(crate) async fn handle_command(command: crate::ChannelCommands, config: &Con
             anyhow::bail!("Remove channel '{name}' — edit ~/.zeroclaw/config.toml directly");
         }
         crate::ChannelCommands::BindTelegram { identity } => {
-            bind_telegram_identity(config, &identity).await
+            Box::pin(bind_telegram_identity(config, &identity)).await
         }
         crate::ChannelCommands::Send {
             message,
@@ -3170,6 +3344,7 @@ fn collect_configured_channels(
                     Vec::new(),
                     sl.allowed_users.clone(),
                 )
+                .with_group_reply_policy(sl.mention_only, Vec::new())
                 .with_workspace_dir(config.workspace_dir.clone()),
             ),
         });
@@ -3264,12 +3439,16 @@ fn collect_configured_channels(
                 if wa.is_web_config() {
                     channels.push(ConfiguredChannel {
                         display_name: "WhatsApp",
-                        channel: Arc::new(WhatsAppWebChannel::new(
-                            wa.session_path.clone().unwrap_or_default(),
-                            wa.pair_phone.clone(),
-                            wa.pair_code.clone(),
-                            wa.allowed_numbers.clone(),
-                        )),
+                        channel: Arc::new(
+                            WhatsAppWebChannel::new(
+                                wa.session_path.clone().unwrap_or_default(),
+                                wa.pair_phone.clone(),
+                                wa.pair_code.clone(),
+                                wa.allowed_numbers.clone(),
+                            )
+                            .with_transcription(config.transcription.clone())
+                            .with_tts(config.tts.clone()),
+                        ),
                     });
                 } else {
                     tracing::warn!("WhatsApp Web configured but session_path not set");
@@ -3422,6 +3601,28 @@ fn collect_configured_channels(
         });
     }
 
+    if let Some(ref tw) = config.channels_config.twitter {
+        channels.push(ConfiguredChannel {
+            display_name: "X/Twitter",
+            channel: Arc::new(TwitterChannel::new(
+                tw.bearer_token.clone(),
+                tw.allowed_users.clone(),
+            )),
+        });
+    }
+
+    if let Some(ref mc) = config.channels_config.mochat {
+        channels.push(ConfiguredChannel {
+            display_name: "Mochat",
+            channel: Arc::new(MochatChannel::new(
+                mc.api_url.clone(),
+                mc.api_token.clone(),
+                mc.allowed_users.clone(),
+                mc.poll_interval_secs,
+            )),
+        });
+    }
+
     if let Some(ref wc) = config.channels_config.wecom {
         channels.push(ConfiguredChannel {
             display_name: "WeCom",
@@ -3465,6 +3666,43 @@ fn collect_configured_channels(
                 )),
             });
         }
+    }
+
+    if let Some(ref rd) = config.channels_config.reddit {
+        channels.push(ConfiguredChannel {
+            display_name: "Reddit",
+            channel: Arc::new(RedditChannel::new(
+                rd.client_id.clone(),
+                rd.client_secret.clone(),
+                rd.refresh_token.clone(),
+                rd.username.clone(),
+                rd.subreddit.clone(),
+            )),
+        });
+    }
+
+    if let Some(ref bs) = config.channels_config.bluesky {
+        channels.push(ConfiguredChannel {
+            display_name: "Bluesky",
+            channel: Arc::new(BlueskyChannel::new(
+                bs.handle.clone(),
+                bs.app_password.clone(),
+            )),
+        });
+    }
+
+    if let Some(ref wh) = config.channels_config.webhook {
+        channels.push(ConfiguredChannel {
+            display_name: "Webhook",
+            channel: Arc::new(WebhookChannel::new(
+                wh.port,
+                wh.listen_path.clone(),
+                wh.send_url.clone(),
+                wh.send_method.clone(),
+                wh.auth_header.clone(),
+                wh.secret.clone(),
+            )),
+        });
     }
 
     channels
@@ -3540,6 +3778,7 @@ pub async fn start_channels(config: Config) -> Result<()> {
         zeroclaw_dir: config.config_path.parent().map(std::path::PathBuf::from),
         secrets_encrypt: config.secrets.encrypt,
         reasoning_enabled: config.runtime.reasoning_enabled,
+        reasoning_effort: config.runtime.reasoning_effort.clone(),
         provider_timeout_secs: Some(config.provider_timeout_secs),
         extra_headers: config.extra_headers.clone(),
         api_path: config.api_path.clone(),
@@ -3623,6 +3862,9 @@ pub async fn start_channels(config: Config) -> Result<()> {
     // When `deferred_loading` is enabled, MCP tools are NOT added eagerly.
     // Instead, a `tool_search` built-in is registered for on-demand loading.
     let mut deferred_section = String::new();
+    let mut ch_activated_handle: Option<
+        std::sync::Arc<std::sync::Mutex<crate::tools::ActivatedToolSet>>,
+    > = None;
     if config.mcp.enabled && !config.mcp.servers.is_empty() {
         tracing::info!(
             "Initializing MCP client — {} server(s) configured",
@@ -3646,6 +3888,7 @@ pub async fn start_channels(config: Config) -> Result<()> {
                     let activated = std::sync::Arc::new(std::sync::Mutex::new(
                         crate::tools::ActivatedToolSet::new(),
                     ));
+                    ch_activated_handle = Some(std::sync::Arc::clone(&activated));
                     built_tools.push(Box::new(crate::tools::ToolSearchTool::new(
                         deferred_set,
                         activated,
@@ -3915,7 +4158,86 @@ pub async fn start_channels(config: Config) -> Result<()> {
                     config.hooks.builtin.webhook_audit.clone(),
                 )));
             }
-            Some(Arc::new(runner))
+            // Water reminder hook
+            if config.hooks.builtin.water_reminder.enabled {
+                let wr_cfg = config.hooks.builtin.water_reminder.clone();
+                let wr_hook_config = crate::hooks::builtin::water_reminder::WaterReminderConfig {
+                    enabled: wr_cfg.enabled,
+                    chat_id: wr_cfg.chat_id,
+                    daily_goal_ml: wr_cfg.daily_goal_ml,
+                    per_drink_ml: wr_cfg.per_drink_ml,
+                    min_sips: wr_cfg.min_sips,
+                    max_sips: wr_cfg.max_sips,
+                    work_start: wr_cfg.work_start,
+                    work_end: wr_cfg.work_end,
+                    lunch_start: wr_cfg.lunch_start,
+                    lunch_end: wr_cfg.lunch_end,
+                    interval_min_minutes: wr_cfg.interval_min_minutes,
+                    interval_max_minutes: wr_cfg.interval_max_minutes,
+                    snooze_wait_seconds: wr_cfg.snooze_wait_seconds,
+                    db_path: wr_cfg.db_path,
+                };
+                match crate::hooks::builtin::water_reminder::WaterReminderHook::new(
+                    wr_hook_config,
+                    Arc::clone(&provider),
+                    model.clone(),
+                ) {
+                    Ok(hook) => {
+                        runner.register(Box::new(hook));
+                        tracing::info!("🚰 Water reminder hook registered");
+                    }
+                    Err(e) => tracing::warn!("Failed to initialize water reminder: {e}"),
+                }
+            }
+            // Release monitor hook
+            if config.hooks.builtin.release_monitor.enabled {
+                let rm_cfg = config.hooks.builtin.release_monitor.clone();
+                let rm_hook_config = crate::hooks::builtin::release_monitor::ReleaseMonitorConfig {
+                    enabled: rm_cfg.enabled,
+                    chat_id: rm_cfg.chat_id,
+                    check_interval_minutes: rm_cfg.check_interval_minutes,
+                    db_path: rm_cfg.db_path,
+                };
+                match crate::hooks::builtin::release_monitor::ReleaseMonitorHook::new(
+                    rm_hook_config,
+                    Arc::clone(&provider),
+                    model.clone(),
+                ) {
+                    Ok(hook) => {
+                        runner.register(Box::new(hook));
+                        tracing::info!("ð¦ Release monitor hook registered");
+                    }
+                    Err(e) => tracing::warn!("Failed to initialize release monitor: {e}"),
+                }
+            }
+            if config.hooks.builtin.news_monitor.enabled {
+                let nm_cfg = config.hooks.builtin.news_monitor.clone();
+                let nm_config = crate::hooks::builtin::news_monitor::NewsMonitorConfig {
+                    enabled: nm_cfg.enabled,
+                    chat_id: nm_cfg.chat_id,
+                    check_interval_minutes: nm_cfg.check_interval_minutes,
+                    db_path: nm_cfg.db_path,
+                };
+                match crate::hooks::builtin::news_monitor::NewsMonitorHook::new(
+                    nm_config,
+                    Arc::clone(&provider),
+                    model.clone(),
+                ) {
+                    Ok(hook) => {
+                        runner.register(Box::new(hook));
+                        tracing::info!("News monitor hook registered");
+                    }
+                    Err(e) => tracing::warn!("Failed to initialize news monitor: {e}"),
+                }
+            }
+            let hooks = Arc::new(runner);
+            // Fire gateway_start on channels' hook runner so hooks like
+            // water_reminder can spawn their background tasks.
+            let hooks_for_start = Arc::clone(&hooks);
+            tokio::spawn(async move {
+                hooks_for_start.fire_gateway_start("channels", 0).await;
+            });
+            Some(hooks)
         } else {
             None
         },
@@ -3940,6 +4262,7 @@ pub async fn start_channels(config: Config) -> Result<()> {
             None
         },
         approval_manager: Arc::new(ApprovalManager::for_non_interactive(&config.autonomy)),
+        activated_tools: ch_activated_handle,
     });
 
     // Hydrate in-memory conversation histories from persisted JSONL session files.
@@ -4232,6 +4555,7 @@ mod tests {
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
+            activated_tools: None,
         };
 
         assert!(compact_sender_history(&ctx, &sender));
@@ -4340,6 +4664,7 @@ mod tests {
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
+            activated_tools: None,
         };
 
         append_sender_turn(&ctx, &sender, ChatMessage::user("hello"));
@@ -4404,6 +4729,7 @@ mod tests {
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
+            activated_tools: None,
         };
 
         assert!(rollback_orphan_user_turn(&ctx, &sender, "pending"));
@@ -4418,6 +4744,101 @@ mod tests {
         assert_eq!(turns.len(), 2);
         assert_eq!(turns[0].content, "first");
         assert_eq!(turns[1].content, "ok");
+    }
+
+    #[test]
+    fn rollback_orphan_user_turn_also_removes_from_session_store() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = Arc::new(session_store::SessionStore::new(tmp.path()).unwrap());
+
+        let sender = "telegram_u4".to_string();
+
+        // Pre-populate the session store with the same turns.
+        store.append(&sender, &ChatMessage::user("first")).unwrap();
+        store
+            .append(&sender, &ChatMessage::assistant("ok"))
+            .unwrap();
+        store
+            .append(
+                &sender,
+                &ChatMessage::user("[IMAGE:/tmp/photo.jpg]\n\nDescribe this"),
+            )
+            .unwrap();
+
+        let mut histories = HashMap::new();
+        histories.insert(
+            sender.clone(),
+            vec![
+                ChatMessage::user("first"),
+                ChatMessage::assistant("ok"),
+                ChatMessage::user("[IMAGE:/tmp/photo.jpg]\n\nDescribe this"),
+            ],
+        );
+
+        let ctx = ChannelRuntimeContext {
+            channels_by_name: Arc::new(HashMap::new()),
+            provider: Arc::new(DummyProvider),
+            default_provider: Arc::new("test-provider".to_string()),
+            memory: Arc::new(NoopMemory),
+            tools_registry: Arc::new(vec![]),
+            observer: Arc::new(NoopObserver),
+            system_prompt: Arc::new("system".to_string()),
+            model: Arc::new("test-model".to_string()),
+            temperature: 0.0,
+            auto_save_memory: false,
+            max_tool_iterations: 5,
+            min_relevance_score: 0.0,
+            conversation_histories: Arc::new(Mutex::new(histories)),
+            provider_cache: Arc::new(Mutex::new(HashMap::new())),
+            route_overrides: Arc::new(Mutex::new(HashMap::new())),
+            api_key: None,
+            api_url: None,
+            reliability: Arc::new(crate::config::ReliabilityConfig::default()),
+            interrupt_on_new_message: InterruptOnNewMessageConfig {
+                telegram: false,
+                slack: false,
+            },
+            multimodal: crate::config::MultimodalConfig::default(),
+            hooks: None,
+            provider_runtime_options: providers::ProviderRuntimeOptions::default(),
+            workspace_dir: Arc::new(std::env::temp_dir()),
+            message_timeout_secs: CHANNEL_MESSAGE_TIMEOUT_SECS,
+            non_cli_excluded_tools: Arc::new(Vec::new()),
+            tool_call_dedup_exempt: Arc::new(Vec::new()),
+            model_routes: Arc::new(Vec::new()),
+            query_classification: crate::config::QueryClassificationConfig::default(),
+            ack_reactions: true,
+            show_tool_calls: true,
+            session_store: Some(Arc::clone(&store)),
+            approval_manager: Arc::new(ApprovalManager::for_non_interactive(
+                &crate::config::AutonomyConfig::default(),
+            )),
+            activated_tools: None,
+        };
+
+        assert!(rollback_orphan_user_turn(
+            &ctx,
+            &sender,
+            "[IMAGE:/tmp/photo.jpg]\n\nDescribe this"
+        ));
+
+        // In-memory history should have 2 turns remaining.
+        let locked = ctx
+            .conversation_histories
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let turns = locked.get(&sender).expect("history should remain");
+        assert_eq!(turns.len(), 2);
+
+        // Session store should also have only 2 entries.
+        let persisted = store.load(&sender);
+        assert_eq!(
+            persisted.len(),
+            2,
+            "session store should also lose the rolled-back turn"
+        );
+        assert_eq!(persisted[0].content, "first");
+        assert_eq!(persisted[1].content, "ok");
     }
 
     struct DummyProvider;
@@ -4926,6 +5347,7 @@ BTC is currently around $65,000 based on latest tool output."#
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
+            activated_tools: None,
         });
 
         process_channel_message(
@@ -4998,6 +5420,7 @@ BTC is currently around $65,000 based on latest tool output."#
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
+            activated_tools: None,
         });
 
         process_channel_message(
@@ -5084,6 +5507,7 @@ BTC is currently around $65,000 based on latest tool output."#
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
+            activated_tools: None,
         });
 
         process_channel_message(
@@ -5155,6 +5579,7 @@ BTC is currently around $65,000 based on latest tool output."#
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
+            activated_tools: None,
         });
 
         process_channel_message(
@@ -5236,6 +5661,7 @@ BTC is currently around $65,000 based on latest tool output."#
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
+            activated_tools: None,
         });
 
         process_channel_message(
@@ -5337,6 +5763,7 @@ BTC is currently around $65,000 based on latest tool output."#
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
+            activated_tools: None,
         });
 
         process_channel_message(
@@ -5420,6 +5847,7 @@ BTC is currently around $65,000 based on latest tool output."#
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
+            activated_tools: None,
         });
 
         process_channel_message(
@@ -5518,6 +5946,7 @@ BTC is currently around $65,000 based on latest tool output."#
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
+            activated_tools: None,
         });
 
         process_channel_message(
@@ -5601,6 +6030,7 @@ BTC is currently around $65,000 based on latest tool output."#
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
+            activated_tools: None,
         });
 
         process_channel_message(
@@ -5674,6 +6104,7 @@ BTC is currently around $65,000 based on latest tool output."#
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
+            activated_tools: None,
         });
 
         process_channel_message(
@@ -5858,6 +6289,7 @@ BTC is currently around $65,000 based on latest tool output."#
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
+            activated_tools: None,
         });
 
         let (tx, rx) = tokio::sync::mpsc::channel::<traits::ChannelMessage>(4);
@@ -5950,6 +6382,7 @@ BTC is currently around $65,000 based on latest tool output."#
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
+            activated_tools: None,
         });
 
         let (tx, rx) = tokio::sync::mpsc::channel::<traits::ChannelMessage>(8);
@@ -6056,6 +6489,7 @@ BTC is currently around $65,000 based on latest tool output."#
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
+            activated_tools: None,
             query_classification: crate::config::QueryClassificationConfig::default(),
         });
 
@@ -6161,6 +6595,7 @@ BTC is currently around $65,000 based on latest tool output."#
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
+            activated_tools: None,
         });
 
         let (tx, rx) = tokio::sync::mpsc::channel::<traits::ChannelMessage>(8);
@@ -6247,6 +6682,7 @@ BTC is currently around $65,000 based on latest tool output."#
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
+            activated_tools: None,
         });
 
         process_channel_message(
@@ -6318,6 +6754,7 @@ BTC is currently around $65,000 based on latest tool output."#
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
+            activated_tools: None,
         });
 
         process_channel_message(
@@ -6853,7 +7290,7 @@ BTC is currently around $65,000 based on latest tool output."#
             .await
             .unwrap();
 
-        let context = build_memory_context(&mem, "age", 0.0).await;
+        let context = build_memory_context(&mem, "age", 0.0, None).await;
         assert!(context.contains("[Memory context]"));
         assert!(context.contains("Age is 45"));
     }
@@ -6885,7 +7322,7 @@ BTC is currently around $65,000 based on latest tool output."#
         .await
         .unwrap();
 
-        let context = build_memory_context(&mem, "screenshot", 0.0).await;
+        let context = build_memory_context(&mem, "screenshot", 0.0, None).await;
 
         // The image-marker entry must be excluded to prevent duplication.
         assert!(
@@ -6947,6 +7384,7 @@ BTC is currently around $65,000 based on latest tool output."#
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
+            activated_tools: None,
         });
 
         process_channel_message(
@@ -7044,6 +7482,7 @@ BTC is currently around $65,000 based on latest tool output."#
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
+            activated_tools: None,
         });
 
         process_channel_message(
@@ -7141,6 +7580,7 @@ BTC is currently around $65,000 based on latest tool output."#
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
+            activated_tools: None,
         });
 
         process_channel_message(
@@ -7702,6 +8142,7 @@ This is an example JSON object for profile settings."#;
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
+            activated_tools: None,
         });
 
         // Simulate a photo attachment message with [IMAGE:] marker.
@@ -7780,6 +8221,7 @@ This is an example JSON object for profile settings."#;
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
+            activated_tools: None,
         });
 
         process_channel_message(
@@ -7932,6 +8374,7 @@ This is an example JSON object for profile settings."#;
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
+            activated_tools: None,
         });
 
         process_channel_message(
@@ -8034,6 +8477,7 @@ This is an example JSON object for profile settings."#;
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
+            activated_tools: None,
         });
 
         process_channel_message(
@@ -8128,6 +8572,7 @@ This is an example JSON object for profile settings."#;
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
+            activated_tools: None,
         });
 
         process_channel_message(
@@ -8242,6 +8687,7 @@ This is an example JSON object for profile settings."#;
             approval_manager: Arc::new(ApprovalManager::for_non_interactive(
                 &crate::config::AutonomyConfig::default(),
             )),
+            activated_tools: None,
         });
 
         process_channel_message(

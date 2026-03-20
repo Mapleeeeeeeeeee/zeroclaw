@@ -22,6 +22,8 @@ pub struct SendMessage {
     pub subject: Option<String>,
     /// Platform thread identifier for threaded replies (e.g. Slack `thread_ts`).
     pub thread_ts: Option<String>,
+    /// Optional reply markup (e.g. Telegram inline keyboards).
+    pub reply_markup: Option<serde_json::Value>,
 }
 
 impl SendMessage {
@@ -32,6 +34,7 @@ impl SendMessage {
             recipient: recipient.into(),
             subject: None,
             thread_ts: None,
+            reply_markup: None,
         }
     }
 
@@ -46,12 +49,19 @@ impl SendMessage {
             recipient: recipient.into(),
             subject: Some(subject.into()),
             thread_ts: None,
+            reply_markup: None,
         }
     }
 
     /// Set the thread identifier for threaded replies.
     pub fn in_thread(mut self, thread_ts: Option<String>) -> Self {
         self.thread_ts = thread_ts;
+        self
+    }
+
+    /// Set reply markup (e.g. inline keyboard JSON for Telegram).
+    pub fn with_reply_markup(mut self, markup: serde_json::Value) -> Self {
+        self.reply_markup = Some(markup);
         self
     }
 }

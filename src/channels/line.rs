@@ -109,10 +109,33 @@ struct PushRequest {
 }
 
 #[derive(Debug, Serialize)]
+struct MentionSubstitution {
+    #[serde(rename = "type")]
+    sub_type: String,
+    mentionee: MentioneeRef,
+}
+
+#[derive(Debug, Serialize)]
+struct MentioneeRef {
+    #[serde(rename = "type")]
+    mentionee_type: String,
+    #[serde(rename = "userId", skip_serializing_if = "Option::is_none")]
+    user_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+enum SubstitutionValue {
+    Mention(MentionSubstitution),
+}
+
+#[derive(Debug, Serialize)]
 struct TextMessage {
     #[serde(rename = "type")]
     message_type: String,
     text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    substitution: Option<HashMap<String, SubstitutionValue>>,
 }
 
 impl TextMessage {
@@ -120,6 +143,67 @@ impl TextMessage {
         Self {
             message_type: "text".to_string(),
             text: content.into(),
+            substitution: None,
+        }
+    }
+
+    /// Build a TextMessage with @name mentions resolved against the member_cache (name -> user_id).
+    /// Uses textV2 format with substitution map when mentions are found.
+    fn with_mentions(content: impl Into<String>, name_to_uid: &HashMap<String, String>) -> Self {
+        let mut text: String = content.into();
+        let mut substitution: HashMap<String, SubstitutionValue> = HashMap::new();
+        let mut counter = 0usize;
+
+        // Collect all @name matches first to avoid modifying string while iterating
+        let mut replacements: Vec<(String, String, String)> = Vec::new(); // (original "@name", placeholder, user_id)
+
+        let chars: Vec<char> = text.chars().collect();
+        let mut i = 0;
+        while i < chars.len() {
+            if chars[i] == '@' {
+                let start = i + 1;
+                let mut end = start;
+                while end < chars.len() {
+                    let ch = chars[end];
+                    if ch.is_alphanumeric() || ch == '_' || ch == '-' || ch > '\u{2E7F}' {
+                        // Include CJK characters (> U+2E7F covers CJK unified ideographs)
+                        end += 1;
+                    } else {
+                        break;
+                    }
+                }
+                if end > start {
+                    let name: String = chars[start..end].iter().collect();
+                    if let Some(uid) = name_to_uid.get(&name) {
+                        let original = format!("@{}", name);
+                        let placeholder = format!("{{mention{}}}", counter);
+                        replacements.push((original, placeholder, uid.clone()));
+                        counter += 1;
+                    }
+                }
+                i = end;
+            } else {
+                i += 1;
+            }
+        }
+
+        // Apply replacements
+        for (original, placeholder, uid) in &replacements {
+            text = text.replacen(original, placeholder, 1);
+            let key = placeholder.trim_matches(|c| c == '{' || c == '}').to_string();
+            substitution.insert(key, SubstitutionValue::Mention(MentionSubstitution {
+                sub_type: "mention".to_string(),
+                mentionee: MentioneeRef {
+                    mentionee_type: "user".to_string(),
+                    user_id: Some(uid.clone()),
+                },
+            }));
+        }
+
+        if substitution.is_empty() {
+            Self { message_type: "text".to_string(), text, substitution: None }
+        } else {
+            Self { message_type: "textV2".to_string(), text, substitution: Some(substitution) }
         }
     }
 }
@@ -242,7 +326,16 @@ impl Channel for LineChannel {
 
     async fn send(&self, message: &SendMessage) -> Result<()> {
         let chunks = split_message(&message.content, MAX_MESSAGE_LENGTH);
-        let messages: Vec<TextMessage> = chunks.into_iter().map(TextMessage::text).collect();
+        // Build a name->user_id reverse map from the member_cache (which is user_id->name)
+        let name_to_uid: std::collections::HashMap<String, String> = {
+            let cache = self.member_cache.lock().await;
+            let map: std::collections::HashMap<String, String> = cache.iter().map(|(uid, name)| (name.clone(), uid.clone())).collect();
+            tracing::debug!("LINE mention: member_cache has {} entries, name_to_uid: {:?}", cache.len(), map.keys().collect::<Vec<_>>());
+            map
+        };
+        let messages: Vec<TextMessage> = chunks.into_iter()
+            .map(|chunk| TextMessage::with_mentions(chunk, &name_to_uid))
+            .collect();
 
         if let Some(token) = self.pop_reply_token(&message.recipient).await {
             debug!("Using reply token for {}", message.recipient);
@@ -435,17 +528,18 @@ async fn handle_message_event(state: &WebhookState, evt: MessageEvent) {
         || text.contains("\u{5c0f}\u{5141}\u{5b50}");
 
     if is_group && !is_mentioned {
-        // Group message without mention: log to session file only, don't trigger AI
-        debug!("Group message without mention, logging only: {content}");
-        let session_key = format!("{}_{}_{}", state.channel_name, reply_target, sender_id);
-        let session_dir = std::path::Path::new(&state.workspace_dir).join("sessions");
-        let _ = std::fs::create_dir_all(&session_dir);
-        let session_path = session_dir.join(format!("{session_key}.jsonl"));
-        if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&session_path) {
-            use std::io::Write;
-            let entry = serde_json::json!({"role": "user", "content": content});
-            let _ = writeln!(file, "{}", entry);
-        }
+        // Group message without mention: send as __silent: to add to in-memory history
+        // without triggering AI response
+        debug!("Group message without mention, sending as silent: {content}");
+        let _ = state.tx.send(ChannelMessage {
+            id: evt.message.id.clone(),
+            sender: sender_id,
+            reply_target,
+            content: format!("__silent:{}", content),
+            channel: state.channel_name.clone(),
+            timestamp: evt.timestamp / 1000,
+            thread_ts,
+        }).await;
         return;
     }
 
