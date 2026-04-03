@@ -28,7 +28,7 @@ This skill accepts a PR number, URL, or no argument (process the queue).
 **Single PR:**
 ```
 /github-pr-review 123
-/github-pr-review https://github.com/zeroclaw-project/zeroclaw/pull/123
+/github-pr-review https://github.com/zeroclaw-labs/zeroclaw/pull/123
 ```
 
 **Queue mode (process all open, unassigned, non-draft PRs):**
@@ -87,4 +87,4 @@ Every PR decision is governed by these — see `AGENTS.md` for full rationale:
 
 ## Verdict Comment Structure
 
-Every verdict comment must open with the **comprehension summary** (what, why, blast radius) and include the **security/performance assessment**. See `references/review-protocol.md` §6.2 for full templates for each of the three outcomes.
+Every verdict comment must open with the **comprehension summary** (what, why, blast radius) and include the **security/performance assessment**. See `references/review-protocol.md` §4.2 for full templates for each of the three outcomes.
