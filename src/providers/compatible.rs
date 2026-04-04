@@ -1158,17 +1158,39 @@ fn sse_bytes_to_events(
 
                         let mut should_emit_tool_calls = false;
                         for choice in &chunk.choices {
-                            if let Some(text_delta) = extract_sse_text_delta(choice) {
-                                let mut text_chunk = StreamChunk::delta(text_delta);
-                                if count_tokens {
-                                    text_chunk = text_chunk.with_token_estimate();
+                            // Emit content and reasoning as separate chunk
+                            // types so consumers can decide how to display
+                            // them.  Previously `extract_sse_text_delta` fell
+                            // back to `reasoning_content` when `content` was
+                            // empty, which caused thinking models like GLM-5
+                            // to leak their chain-of-thought into the visible
+                            // response text.
+                            if let Some(content) = &choice.delta.content {
+                                if !content.is_empty() {
+                                    let mut text_chunk = StreamChunk::delta(content.clone());
+                                    if count_tokens {
+                                        text_chunk = text_chunk.with_token_estimate();
+                                    }
+                                    if tx
+                                        .send(Ok(StreamEvent::TextDelta(text_chunk)))
+                                        .await
+                                        .is_err()
+                                    {
+                                        return;
+                                    }
                                 }
-                                if tx
-                                    .send(Ok(StreamEvent::TextDelta(text_chunk)))
-                                    .await
-                                    .is_err()
-                                {
-                                    return;
+                            }
+                            if let Some(reasoning) = &choice.delta.reasoning_content {
+                                if !reasoning.is_empty() {
+                                    let reasoning_chunk =
+                                        StreamChunk::reasoning(reasoning.clone());
+                                    if tx
+                                        .send(Ok(StreamEvent::TextDelta(reasoning_chunk)))
+                                        .await
+                                        .is_err()
+                                    {
+                                        return;
+                                    }
                                 }
                             }
 
