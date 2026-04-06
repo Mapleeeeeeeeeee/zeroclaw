@@ -34,7 +34,7 @@ pub fn spawn_config_watcher(state: AppState, config_path: PathBuf) {
 
             tracing::debug!("config.toml changed on disk — reloading");
 
-            match crate::config::Config::load_or_init().await {
+            match Box::pin(crate::config::Config::load_or_init()).await {
                 Ok(new_config) => {
                     *state.config.lock() = new_config;
 
