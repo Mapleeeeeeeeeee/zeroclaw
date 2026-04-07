@@ -368,6 +368,7 @@ struct App {
     // Channel
     channel_idx: usize,
     channel_scroll: usize,
+    channel_selected: Vec<bool>,
 
     // Web search
     search_provider_idx: usize,
@@ -376,6 +377,7 @@ struct App {
     // Skills
     skills_idx: usize,
     skills_scroll: usize,
+    skills_selected: Vec<bool>,
 
     // Hooks
     hooks_idx: usize,
@@ -443,10 +445,12 @@ impl App {
             fetched_models: Vec::new(),
             channel_idx: 0,
             channel_scroll: 0,
+            channel_selected: vec![false; CHANNELS.len()],
             search_provider_idx: 0,
             search_api_key_input: String::new(),
             skills_idx: 0,
             skills_scroll: 0,
+            skills_selected: vec![false; SKILLS.len()],
             hooks_idx: 0,
             // Full Setup defaults
             workspace_dir_input: std::env::var("HOME")
@@ -545,7 +549,7 @@ impl App {
         }
 
         // 7. Gateway not reachable — show instructions instead of a fake code
-        self.pairing_code = String::from("------");
+        self.pairing_code = String::from("(start daemon first)");
         self.pairing_required = true;
     }
 
@@ -776,7 +780,7 @@ pub async fn run_tui_onboarding() -> Result<()> {
                     }
                 );
                 println!("     Dashboard:  {}", app.gateway_base_url());
-                if app.pairing_required && app.pairing_code != "------" {
+                if app.pairing_required && !app.pairing_code.starts_with('(') {
                     println!("     Pair code:  {}", app.pairing_code);
                 }
                 println!();
@@ -1723,6 +1727,12 @@ fn handle_input(app: &mut App, key: KeyCode) {
                 nav_down(&mut app.skills_idx, SKILLS.len() - 1);
                 // Scroll down: handled in render via auto-scroll
             }
+            KeyCode::Char(' ') => {
+                // Toggle skill selection (skip the "Skip for now" entry at index 0)
+                if app.skills_idx > 0 {
+                    app.skills_selected[app.skills_idx] = !app.skills_selected[app.skills_idx];
+                }
+            }
             KeyCode::Enter => app.screen = Screen::HooksInfo,
             KeyCode::Esc => app.screen = Screen::SkillsStatus,
             _ => {}
@@ -1809,8 +1819,17 @@ fn render(frame: &mut Frame, app: &App) {
     frame.render_widget(bg_block, area);
 
     // Layout: banner + version + content + footer
+    // Compact banner for list-heavy screens to show more items
+    let banner_height = match app.screen {
+        Screen::ChannelSelect
+        | Screen::SkillsInstall
+        | Screen::ModelSelect
+        | Screen::ProviderSelect
+        | Screen::ProviderTier => 5,
+        _ => 10,
+    };
     let outer = Layout::vertical([
-        Constraint::Length(10),
+        Constraint::Length(banner_height),
         Constraint::Length(1),
         Constraint::Min(10),
         Constraint::Length(1),
@@ -1853,6 +1872,19 @@ fn render(frame: &mut Frame, app: &App) {
             Span::styled(" Enter/q", theme::heading_style()),
             Span::styled(" exit", theme::dim_style()),
         ]),
+        // Multi-select screens: Space to toggle, Enter to confirm
+        Screen::ChannelSelect | Screen::SkillsInstall => Line::from(vec![
+            Span::styled(" \u{2191}\u{2193}", theme::heading_style()),
+            Span::styled(" navigate  ", theme::dim_style()),
+            Span::styled("Space", theme::heading_style()),
+            Span::styled(" toggle  ", theme::dim_style()),
+            Span::styled("Enter", theme::heading_style()),
+            Span::styled(" confirm  ", theme::dim_style()),
+            Span::styled("Esc", theme::heading_style()),
+            Span::styled(" back  ", theme::dim_style()),
+            Span::styled("Ctrl+C", theme::heading_style()),
+            Span::styled(" quit", theme::dim_style()),
+        ]),
         Screen::ExistingConfig
         | Screen::QuickStartSummary
         | Screen::ProviderNotes
@@ -1873,6 +1905,8 @@ fn render(frame: &mut Frame, app: &App) {
         | Screen::WhatNow => Line::from(vec![
             Span::styled(" Enter", theme::heading_style()),
             Span::styled(" continue  ", theme::dim_style()),
+            Span::styled("Esc", theme::heading_style()),
+            Span::styled(" back  ", theme::dim_style()),
             Span::styled("Ctrl+C", theme::heading_style()),
             Span::styled(" quit", theme::dim_style()),
         ]),
@@ -2530,11 +2564,11 @@ fn render_model_configured(frame: &mut Frame, area: Rect, app: &App) {
 
     let model_name = match app.selected_provider() {
         "Z.AI" => "zai/glm-5",
-        "Anthropic" => "anthropic/claude-sonnet-4",
-        "OpenAI" => "openai/gpt-4o",
-        "Google" => "google/gemini-2.0-flash",
-        "Groq" => "groq/llama-3.3-70b",
-        "Ollama" => "ollama/llama3",
+        "Anthropic" => "anthropic/claude-sonnet-4.6",
+        "OpenAI" => "openai/gpt-5.4",
+        "Google" => "google/gemini-3-pro",
+        "Groq" => "groq/llama-4-maverick-70b",
+        "Ollama" => "ollama/llama4",
         _ => "auto",
     };
 
@@ -2626,8 +2660,7 @@ fn render_channel_status(frame: &mut Frame, area: Rect) {
         ("Slack", "needs tokens", false),
         ("Signal", "needs setup", false),
         ("signal-cli", "missing (signal-cli)", false),
-        ("iMessage", "needs setup", false),
-        ("imsg", "found (imsg)", true),
+        ("iMessage", "needs setup (imsg bridge)", false),
         ("LINE", "needs token + secret", false),
         ("Mattermost", "needs token + url", false),
         ("Nextcloud Talk", "needs setup", false),
@@ -2643,7 +2676,6 @@ fn render_channel_status(frame: &mut Frame, area: Rect) {
         ("Zalo Personal", "installed", true),
         ("Tlon", "installed", true),
         ("Twitch", "installed", true),
-        ("WhatsApp", "installed", true),
     ]
     .into_iter()
     .map(|(name, status, ok)| {
@@ -2711,27 +2743,21 @@ fn render_how_channels_work(frame: &mut Frame, area: Rect) {
         )),
         Line::from(""),
         Line::from(Span::styled(
-            "  Telegram: simplest way to get started \u{2014} register a bot with",
+            "  Telegram: simplest way to get started \u{2014} register a bot with @BotFather and get going.",
             theme::body_style(),
         )),
         Line::from(Span::styled(
-            "  @BotFather and get going.",
+            "  WhatsApp: works with your own number; recommend a separate phone + eSIM.",
             theme::body_style(),
         )),
-        Line::from(Span::styled(
-            "  WhatsApp: works with your own number; recommend a separate phone",
-            theme::body_style(),
-        )),
-        Line::from(Span::styled("  + eSIM.", theme::body_style())),
         Line::from(Span::styled(
             "  Discord: very well supported right now.",
             theme::body_style(),
         )),
         Line::from(Span::styled(
-            "  IRC: classic IRC networks with DM/channel routing and pairing",
+            "  IRC: classic IRC networks with DM/channel routing and pairing controls.",
             theme::body_style(),
         )),
-        Line::from(Span::styled("  controls.", theme::body_style())),
         Line::from(Span::styled(
             "  Slack: supported (Socket Mode).",
             theme::body_style(),
@@ -2786,7 +2812,7 @@ fn render_channel_select(frame: &mut Frame, area: Rect, app: &App) {
             } else {
                 hint.to_string()
             },
-            is_active: i == app.channel_idx,
+            is_active: app.channel_selected.get(i).copied().unwrap_or(false),
             installed: *installed,
         })
         .collect();
@@ -2800,7 +2826,7 @@ fn render_channel_select(frame: &mut Frame, area: Rect, app: &App) {
 
     frame.render_widget(
         SelectableList {
-            title: "Select channel (QuickStart)",
+            title: "Select channels (Space to toggle)",
             items: &items,
             selected: app.channel_idx,
             scroll_offset: scroll,
@@ -2930,7 +2956,7 @@ fn render_skills_status(frame: &mut Frame, area: Rect) {
                 ]),
                 Line::from(vec![
                     Span::styled("  Missing requirements: ", theme::dim_style()),
-                    Span::styled(format!("{skill_count}"), theme::warn_style()),
+                    Span::styled("not checked yet", theme::dim_style()),
                 ]),
                 Line::from(vec![
                     Span::styled("  Unsupported on this OS: ", theme::dim_style()),
@@ -2962,7 +2988,7 @@ fn render_skills_install(frame: &mut Frame, area: Rect, app: &App) {
         .map(|(i, (name, desc))| SelectableItem {
             label: name.to_string(),
             hint: desc.to_string(),
-            is_active: i == app.skills_idx,
+            is_active: app.skills_selected.get(i).copied().unwrap_or(false),
             installed: false,
         })
         .collect();
@@ -2976,7 +3002,7 @@ fn render_skills_install(frame: &mut Frame, area: Rect, app: &App) {
 
     frame.render_widget(
         SelectableList {
-            title: "Install missing skill dependencies",
+            title: "Select skills (Space to toggle)",
             items: &items,
             selected: app.skills_idx,
             scroll_offset: scroll,
@@ -3216,36 +3242,48 @@ fn render_control_ui(frame: &mut Frame, area: Rect, app: &App) {
 
     if app.pairing_required {
         lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            "  \u{1f510} PAIRING CODE \u{2014} enter this in the web dashboard to connect:",
-            theme::warn_style(),
-        )));
-        lines.push(Line::from(""));
-        lines.push(Line::from(vec![
-            Span::styled(
-                "     \u{250c}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2510}",
-                theme::accent_style(),
-            ),
-        ]));
-        lines.push(Line::from(vec![
-            Span::styled("     \u{2502}  ", theme::accent_style()),
-            Span::styled(
-                &app.pairing_code,
-                theme::title_style().add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("  \u{2502}", theme::accent_style()),
-        ]));
-        lines.push(Line::from(vec![
-            Span::styled(
-                "     \u{2514}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2518}",
-                theme::accent_style(),
-            ),
-        ]));
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            "  Also works with: Docker, macOS app, iOS/Android",
-            theme::dim_style(),
-        )));
+        if app.pairing_code.starts_with('(') {
+            // Gateway not running — show instructions instead of a fake code
+            lines.push(Line::from(Span::styled(
+                "  \u{1f510} PAIRING CODE \u{2014} not available yet (gateway not running)",
+                theme::warn_style(),
+            )));
+            lines.push(Line::from(Span::styled(
+                "  Run `zeroclaw daemon` first, then `zeroclaw gateway get-paircode`",
+                theme::dim_style(),
+            )));
+        } else {
+            lines.push(Line::from(Span::styled(
+                "  \u{1f510} PAIRING CODE \u{2014} enter this in the web dashboard to connect:",
+                theme::warn_style(),
+            )));
+            lines.push(Line::from(""));
+            lines.push(Line::from(vec![
+                Span::styled(
+                    "     \u{250c}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2510}",
+                    theme::accent_style(),
+                ),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled("     \u{2502}  ", theme::accent_style()),
+                Span::styled(
+                    &app.pairing_code,
+                    theme::title_style().add_modifier(Modifier::BOLD),
+                ),
+                Span::styled("  \u{2502}", theme::accent_style()),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled(
+                    "     \u{2514}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2518}",
+                    theme::accent_style(),
+                ),
+            ]));
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "  Also works with: Docker, macOS app, iOS/Android",
+                theme::dim_style(),
+            )));
+        }
     } else {
         lines.push(Line::from(""));
         lines.push(Line::from(vec![
@@ -3493,13 +3531,20 @@ fn render_complete(frame: &mut Frame, area: Rect, app: &App) {
     ];
 
     if app.pairing_required {
-        summary_lines.push(Line::from(vec![
-            Span::styled("  Pairing code:  ", theme::dim_style()),
-            Span::styled(
-                &app.pairing_code,
-                theme::title_style().add_modifier(Modifier::BOLD),
-            ),
-        ]));
+        if app.pairing_code.starts_with('(') {
+            summary_lines.push(Line::from(vec![
+                Span::styled("  Pairing code:  ", theme::dim_style()),
+                Span::styled("available after starting daemon", theme::dim_style()),
+            ]));
+        } else {
+            summary_lines.push(Line::from(vec![
+                Span::styled("  Pairing code:  ", theme::dim_style()),
+                Span::styled(
+                    &app.pairing_code,
+                    theme::title_style().add_modifier(Modifier::BOLD),
+                ),
+            ]));
+        }
     } else {
         summary_lines.push(Line::from(vec![
             Span::styled("  Pairing:       ", theme::dim_style()),
@@ -3510,11 +3555,15 @@ fn render_complete(frame: &mut Frame, area: Rect, app: &App) {
     summary_lines.extend([
         Line::from(""),
         Line::from(Span::styled(
-            "  Run `zeroclaw daemon` to start your agent.",
+            "  1. Finish channel config:  `zeroclaw config edit`",
             theme::body_style(),
         )),
         Line::from(Span::styled(
-            "  Run `zeroclaw doctor` to validate your setup.",
+            "  2. Start your agent:       `zeroclaw daemon`",
+            theme::body_style(),
+        )),
+        Line::from(Span::styled(
+            "  3. Validate your setup:    `zeroclaw doctor`",
             theme::body_style(),
         )),
         Line::from(""),
@@ -4008,10 +4057,12 @@ mod tests {
             fetched_models: Vec::new(),
             channel_idx: 0,
             channel_scroll: 0,
+            channel_selected: vec![false; CHANNELS.len()],
             search_provider_idx: 0,
             search_api_key_input: String::new(),
             skills_idx: 0,
             skills_scroll: 0,
+            skills_selected: vec![false; SKILLS.len()],
             hooks_idx: 0,
             workspace_dir_input: "/tmp/test-workspace".to_string(),
             tunnel_provider_idx: 0,

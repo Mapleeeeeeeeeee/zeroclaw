@@ -856,8 +856,8 @@ const MINIMAX_ONBOARD_MODELS: [(&str, &str); 7] = [
 fn default_model_for_provider(provider: &str) -> String {
     match canonical_provider_name(provider) {
         "anthropic" => "claude-sonnet-4-5-20250929".into(),
-        "openai" => "gpt-5.2".into(),
-        "openai-codex" => "gpt-5-codex".into(),
+        "openai" => "gpt-5.4".into(),
+        "openai-codex" => "gpt-5.4-codex".into(),
         "venice" => "zai-org-glm-5".into(),
         "groq" => "llama-3.3-70b-versatile".into(),
         "mistral" => "mistral-large-latest".into(),
@@ -893,8 +893,8 @@ pub fn curated_models_for_provider(provider_name: &str) -> Vec<(String, String)>
                 "Claude Sonnet 4.6 (balanced, recommended)".to_string(),
             ),
             (
-                "openai/gpt-5.2".to_string(),
-                "GPT-5.2 (latest flagship)".to_string(),
+                "openai/gpt-5.4".to_string(),
+                "GPT-5.4 (latest flagship)".to_string(),
             ),
             (
                 "openai/gpt-5-mini".to_string(),
@@ -933,30 +933,30 @@ pub fn curated_models_for_provider(provider_name: &str) -> Vec<(String, String)>
         ],
         "openai" => vec![
             (
-                "gpt-5.2".to_string(),
-                "GPT-5.2 (latest coding/agentic flagship)".to_string(),
+                "gpt-5.4".to_string(),
+                "GPT-5.4 (latest coding/agentic flagship)".to_string(),
             ),
             (
-                "gpt-5-mini".to_string(),
-                "GPT-5 mini (faster, cheaper)".to_string(),
+                "gpt-5.4-mini".to_string(),
+                "GPT-5.4 mini (faster, cheaper)".to_string(),
             ),
             (
                 "gpt-5-nano".to_string(),
                 "GPT-5 nano (lowest latency/cost)".to_string(),
             ),
             (
-                "gpt-5.2-codex".to_string(),
-                "GPT-5.2 Codex (agentic coding)".to_string(),
+                "gpt-5.4-codex".to_string(),
+                "GPT-5.4 Codex (agentic coding)".to_string(),
             ),
         ],
         "openai-codex" => vec![
             (
-                "gpt-5-codex".to_string(),
-                "GPT-5 Codex (recommended)".to_string(),
+                "gpt-5.4-codex".to_string(),
+                "GPT-5.4 Codex (recommended)".to_string(),
             ),
             (
-                "gpt-5.2-codex".to_string(),
-                "GPT-5.2 Codex (agentic coding)".to_string(),
+                "gpt-5-codex".to_string(),
+                "GPT-5 Codex (agentic coding)".to_string(),
             ),
             ("o4-mini".to_string(), "o4-mini (fallback)".to_string()),
         ],
@@ -1207,8 +1207,8 @@ pub fn curated_models_for_provider(provider_name: &str) -> Vec<(String, String)>
                 "Claude Sonnet 4.6 (balanced default)".to_string(),
             ),
             (
-                "openai/gpt-5.2".to_string(),
-                "GPT-5.2 (latest flagship)".to_string(),
+                "openai/gpt-5.4".to_string(),
+                "GPT-5.4 (latest flagship)".to_string(),
             ),
             (
                 "deepseek/deepseek-v3.2".to_string(),
@@ -6286,12 +6286,12 @@ mod tests {
             &mut config,
             "openrouter".to_string(),
             "sk-updated".to_string(),
-            "openai/gpt-5.2".to_string(),
+            "openai/gpt-5.4".to_string(),
             Some("https://openrouter.ai/api/v1".to_string()),
         );
 
         assert_eq!(config.default_provider.as_deref(), Some("openrouter"));
-        assert_eq!(config.default_model.as_deref(), Some("openai/gpt-5.2"));
+        assert_eq!(config.default_model.as_deref(), Some("openai/gpt-5.4"));
         assert_eq!(config.api_key.as_deref(), Some("sk-updated"));
         assert_eq!(
             config.api_url.as_deref(),
@@ -7047,8 +7047,8 @@ mod tests {
             default_model_for_provider("openrouter"),
             "anthropic/claude-sonnet-4.6"
         );
-        assert_eq!(default_model_for_provider("openai"), "gpt-5.2");
-        assert_eq!(default_model_for_provider("openai-codex"), "gpt-5-codex");
+        assert_eq!(default_model_for_provider("openai"), "gpt-5.4");
+        assert_eq!(default_model_for_provider("openai-codex"), "gpt-5.4-codex");
         assert_eq!(
             default_model_for_provider("anthropic"),
             "claude-sonnet-4-5-20250929"
@@ -7126,8 +7126,8 @@ mod tests {
             .map(|(id, _)| id)
             .collect();
 
-        assert!(ids.contains(&"gpt-5.2".to_string()));
-        assert!(ids.contains(&"gpt-5-mini".to_string()));
+        assert!(ids.contains(&"gpt-5.4".to_string()));
+        assert!(ids.contains(&"gpt-5.4-mini".to_string()));
     }
 
     #[test]
@@ -7151,8 +7151,8 @@ mod tests {
             .map(|(id, _)| id)
             .collect();
 
+        assert!(ids.contains(&"gpt-5.4-codex".to_string()));
         assert!(ids.contains(&"gpt-5-codex".to_string()));
-        assert!(ids.contains(&"gpt-5.2-codex".to_string()));
     }
 
     #[test]
