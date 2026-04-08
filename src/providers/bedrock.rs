@@ -697,7 +697,7 @@ impl BedrockProvider {
     /// occur when a daemon restart interrupts a streaming response, leaving a
     /// partially-persisted message with empty content, or when bot/attachment-
     /// only messages produce empty text blocks.
-    fn sanitize_empty_content_blocks(messages: &mut Vec<ConverseMessage>) {
+    fn sanitize_empty_content_blocks(messages: &mut [ConverseMessage]) {
         for msg in messages.iter_mut() {
             msg.content.retain(|block| match block {
                 ContentBlock::Text(tb) => !tb.text.trim().is_empty(),
@@ -1899,7 +1899,6 @@ mod tests {
             ChatMessage {
                 role: "assistant".to_string(),
                 content: "".to_string(),
-                name: None,
             },
             ChatMessage::user("Continue"),
         ];
