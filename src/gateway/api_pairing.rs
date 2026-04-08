@@ -275,6 +275,19 @@ pub async fn submit_pairing_enhanced(
 
     match state.pairing.try_pair(code, &client_id).await {
         Ok(Some(token)) => {
+            // Persist token to config.toml BEFORE returning it to the client.
+            if let Err(err) =
+                Box::pin(super::persist_pairing_tokens(state.config.clone(), &state.pairing)).await
+            {
+                tracing::error!("🔐 API pairing token persistence failed: {err:#}");
+                state.pairing.generate_new_pairing_code();
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Pairing failed — could not persist token. Check disk space and permissions.",
+                )
+                    .into_response();
+            }
+
             // Register the new device
             let token_hash = {
                 use sha2::{Digest, Sha256};

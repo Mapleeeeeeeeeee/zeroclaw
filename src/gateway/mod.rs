@@ -1229,17 +1229,19 @@ async fn handle_pair(
     match state.pairing.try_pair(code, &rate_key).await {
         Ok(Some(token)) => {
             tracing::info!("🔐 New client paired successfully");
+            // Persist token to config.toml BEFORE returning it to the client.
+            // If persistence fails, the token would be lost on gateway restart,
+            // so we fail the request and regenerate the pairing code for retry.
             if let Err(err) =
                 Box::pin(persist_pairing_tokens(state.config.clone(), &state.pairing)).await
             {
-                tracing::error!("🔐 Pairing succeeded but token persistence failed: {err:#}");
+                tracing::error!("🔐 Pairing token persistence failed: {err:#}");
+                // Regenerate a fresh pairing code so the user can try again
+                state.pairing.generate_new_pairing_code();
                 let body = serde_json::json!({
-                    "paired": true,
-                    "persisted": false,
-                    "token": token,
-                    "message": "Paired for this process, but failed to persist token to config.toml. Check config path and write permissions.",
+                    "error": "Pairing failed — could not persist token to config.toml. Check disk space and file permissions, then try again with the new pairing code.",
                 });
-                return (StatusCode::OK, Json(body));
+                return (StatusCode::INTERNAL_SERVER_ERROR, Json(body));
             }
 
             let body = serde_json::json!({
@@ -1269,7 +1271,7 @@ async fn handle_pair(
     }
 }
 
-async fn persist_pairing_tokens(config: Arc<Mutex<Config>>, pairing: &PairingGuard) -> Result<()> {
+pub(crate) async fn persist_pairing_tokens(config: Arc<Mutex<Config>>, pairing: &PairingGuard) -> Result<()> {
     let paired_tokens = pairing.tokens();
     // This is needed because parking_lot's guard is not Send so we clone the inner
     // this should be removed once async mutexes are used everywhere

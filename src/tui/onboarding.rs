@@ -1781,11 +1781,12 @@ fn handle_input(app: &mut App, key: KeyCode) {
         },
 
         Screen::HealthCheck => match key {
-            KeyCode::Enter => app.screen = Screen::OptionalApps,
+            KeyCode::Enter => app.screen = Screen::ControlUI,
             KeyCode::Esc => app.screen = Screen::GatewayService,
             _ => {}
         },
 
+        // OptionalApps skipped — macOS/iOS/Android apps not available yet
         Screen::OptionalApps => match key {
             KeyCode::Enter => app.screen = Screen::ControlUI,
             KeyCode::Esc => app.screen = Screen::HealthCheck,
@@ -1794,7 +1795,7 @@ fn handle_input(app: &mut App, key: KeyCode) {
 
         Screen::ControlUI => match key {
             KeyCode::Enter => app.screen = Screen::WorkspaceBackup,
-            KeyCode::Esc => app.screen = Screen::OptionalApps,
+            KeyCode::Esc => app.screen = Screen::HealthCheck,
             _ => {}
         },
 
