@@ -570,16 +570,12 @@ impl Agent {
             .hook_runner(if config.hooks.enabled {
                 let mut runner = crate::hooks::HookRunner::new();
                 if config.hooks.builtin.command_logger {
-                    runner.register(Box::new(
-                        crate::hooks::builtin::CommandLoggerHook::new(),
-                    ));
+                    runner.register(Box::new(crate::hooks::builtin::CommandLoggerHook::new()));
                 }
                 if config.hooks.builtin.webhook_audit.enabled {
-                    runner.register(Box::new(
-                        crate::hooks::builtin::WebhookAuditHook::new(
-                            config.hooks.builtin.webhook_audit.clone(),
-                        ),
-                    ));
+                    runner.register(Box::new(crate::hooks::builtin::WebhookAuditHook::new(
+                        config.hooks.builtin.webhook_audit.clone(),
+                    )));
                 }
                 Some(Arc::new(runner))
             } else {
@@ -677,10 +673,7 @@ impl Agent {
                         if r.success {
                             (r.output, true)
                         } else {
-                            (
-                                format!("Error: {}", r.error.unwrap_or(r.output)),
-                                false,
-                            )
+                            (format!("Error: {}", r.error.unwrap_or(r.output)), false)
                         }
                     }
                     Err(e) => {
@@ -693,8 +686,7 @@ impl Agent {
                     }
                 }
             } else if let Some(activated_arc) = self.activated_tools.as_ref() {
-                let activated_opt =
-                    activated_arc.lock().unwrap().get_resolved(&tool_name);
+                let activated_opt = activated_arc.lock().unwrap().get_resolved(&tool_name);
                 if let Some(tool) = activated_opt {
                     match tool.execute(tool_args.clone()).await {
                         Ok(r) => {
@@ -706,13 +698,7 @@ impl Agent {
                             if r.success {
                                 (r.output, true)
                             } else {
-                                (
-                                    format!(
-                                        "Error: {}",
-                                        r.error.unwrap_or(r.output)
-                                    ),
-                                    false,
-                                )
+                                (format!("Error: {}", r.error.unwrap_or(r.output)), false)
                             }
                         }
                         Err(e) => {
@@ -721,10 +707,7 @@ impl Agent {
                                 duration: start.elapsed(),
                                 success: false,
                             });
-                            (
-                                format!("Error executing {}: {e}", tool_name),
-                                false,
-                            )
+                            (format!("Error executing {}: {e}", tool_name), false)
                         }
                     }
                 } else {
@@ -1545,12 +1528,10 @@ mod tests {
 
         let response = agent.turn("hi").await.unwrap();
         assert_eq!(response, "done");
-        assert!(
-            agent
-                .history()
-                .iter()
-                .any(|msg| matches!(msg, ConversationMessage::ToolResults(_)))
-        );
+        assert!(agent
+            .history()
+            .iter()
+            .any(|msg| matches!(msg, ConversationMessage::ToolResults(_))));
     }
 
     #[tokio::test]
@@ -1609,7 +1590,7 @@ mod tests {
 
     #[tokio::test]
     async fn from_config_passes_extra_headers_to_custom_provider() {
-        use axum::{Json, Router, http::HeaderMap, routing::post};
+        use axum::{http::HeaderMap, routing::post, Json, Router};
         use tempfile::TempDir;
         use tokio::net::TcpListener;
 
