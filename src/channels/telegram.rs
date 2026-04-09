@@ -395,9 +395,7 @@ impl TelegramChannel {
             tts_config: None,
             voice_chats: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             pending_voice: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-            pending_media_groups: Arc::new(std::sync::Mutex::new(
-                std::collections::HashMap::new(),
-            )),
+            pending_media_groups: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             proxy_url: None,
         }
     }
@@ -1207,10 +1205,7 @@ Allowlist Telegram username (without '@') or numeric user ID.",
     /// Downloads each attachment, concatenates their `[IMAGE:]`/`[Document:]`
     /// markers into one content string, and uses the first message's caption (if
     /// any) as the shared text. Returns `None` if no attachments could be parsed.
-    async fn merge_media_group(
-        &self,
-        updates: &[serde_json::Value],
-    ) -> Option<ChannelMessage> {
+    async fn merge_media_group(&self, updates: &[serde_json::Value]) -> Option<ChannelMessage> {
         if updates.is_empty() {
             return None;
         }
@@ -1264,8 +1259,12 @@ Allowlist Telegram username (without '@') or numeric user ID.",
         let mut shared_caption: Option<String> = None;
 
         for update in updates {
-            let message = update.get("message")?;
-            let attachment = Self::parse_attachment_metadata(message)?;
+            let Some(message) = update.get("message") else {
+                continue;
+            };
+            let Some(attachment) = Self::parse_attachment_metadata(message) else {
+                continue;
+            };
 
             // Check file size limit
             if let Some(size) = attachment.file_size {
