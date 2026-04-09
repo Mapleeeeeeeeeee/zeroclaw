@@ -174,7 +174,13 @@ impl TextMessage {
                 }
                 if end > start {
                     let name: String = chars[start..end].iter().collect();
-                    if let Some(uid) = name_to_uid.get(&name) {
+                    // Fuzzy match: @Emily matches display name containing "Emily"
+                    let matched_uid = name_to_uid.get(&name).cloned().or_else(|| {
+                        name_to_uid.iter()
+                            .find(|(display, _)| display.contains(&name))
+                            .map(|(_, uid)| uid.clone())
+                    });
+                    if let Some(uid) = matched_uid {
                         let original = format!("@{}", name);
                         let placeholder = format!("{{mention{}}}", counter);
                         replacements.push((original, placeholder, uid.clone()));
@@ -220,6 +226,7 @@ struct WebhookState {
     member_cache: Arc<Mutex<HashMap<String, String>>>,
     bot_display_name: String,
     workspace_dir: String,
+    cache_path: String,
 }
 
 impl WebhookState {
@@ -243,6 +250,7 @@ pub struct LineChannel {
     member_cache: Arc<Mutex<HashMap<String, String>>>,
     bot_display_name: String,
     workspace_dir: String,
+    cache_path: String,
 }
 
 impl LineChannel {
@@ -255,6 +263,15 @@ impl LineChannel {
         bot_display_name: impl Into<String>,
         workspace_dir: impl Into<String>,
     ) -> Self {
+        let cache_path = format!(
+            "{}/.zeroclaw/member_cache.json",
+            std::env::var("HOME").unwrap_or_else(|_| "/home/azureuser".to_string())
+        );
+        let initial_cache: HashMap<String, String> = std::fs::read_to_string(&cache_path)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+        info!("Loaded {} member(s) from cache file: {}", initial_cache.len(), cache_path);
         Self {
             channel_access_token: channel_access_token.into(),
             channel_secret: channel_secret.into(),
@@ -263,9 +280,10 @@ impl LineChannel {
             allowed_groups,
             client: Client::new(),
             reply_tokens: Arc::new(Mutex::new(HashMap::new())),
-            member_cache: Arc::new(Mutex::new(HashMap::new())),
+            member_cache: Arc::new(Mutex::new(initial_cache)),
             bot_display_name: bot_display_name.into(),
             workspace_dir: workspace_dir.into(),
+            cache_path,
         }
     }
 
@@ -342,10 +360,8 @@ impl Channel for LineChannel {
             match self.send_reply(&token, messages).await {
                 Ok(()) => return Ok(()),
                 Err(e) => {
-                    warn!("Reply API failed, falling back to push: {e}");
-                    let chunks = split_message(&message.content, MAX_MESSAGE_LENGTH);
-                    let messages: Vec<TextMessage> = chunks.into_iter().map(TextMessage::text).collect();
-                    return self.send_push(&message.recipient, messages).await;
+                    warn!("Reply API failed, message dropped: {e}");
+                    return Err(e);
                 }
             }
         }
@@ -366,6 +382,7 @@ impl Channel for LineChannel {
             member_cache: Arc::clone(&self.member_cache),
             bot_display_name: self.bot_display_name.clone(),
             workspace_dir: self.workspace_dir.clone(),
+            cache_path: self.cache_path.clone(),
         };
 
         let app = Router::new()
@@ -459,9 +476,19 @@ async fn resolve_display_name(
     let client = Client::new();
     let name = fetch_display_name(&client, &state.channel_access_token, user_id, group_id).await;
 
-    {
+    let cache_snapshot = {
         let mut cache = state.member_cache.lock().await;
         cache.insert(user_id.to_string(), name.clone());
+        cache.clone()
+    };
+
+    // Persist updated cache to disk (best-effort)
+    if let Ok(json) = serde_json::to_string_pretty(&cache_snapshot) {
+        if let Err(e) = std::fs::write(&state.cache_path, &json) {
+            warn!("Failed to write member cache to {}: {e}", state.cache_path);
+        } else {
+            debug!("Member cache saved ({} entries) to {}", cache_snapshot.len(), state.cache_path);
+        }
     }
 
     name
@@ -549,7 +576,7 @@ async fn handle_message_event(state: &WebhookState, evt: MessageEvent) {
             let client = Client::new();
             let _ = client.post("https://api.line.me/v2/bot/chat/loading/start")
                 .bearer_auth(&state.channel_access_token)
-                .json(&serde_json::json!({"chatId": uid, "loadingSeconds": 20}))
+                .json(&serde_json::json!({"chatId": uid, "loadingSeconds": 60}))
                 .send()
                 .await;
         }

@@ -98,6 +98,7 @@ pub struct WaterReminderHook {
     pub http_client: reqwest::Client,
     pub provider: Arc<dyn Provider>,
     pub model: String,
+    pub identity: String,
 }
 
 impl WaterReminderHook {
@@ -121,7 +122,9 @@ impl WaterReminderHook {
                 id INTEGER PRIMARY KEY CHECK (id = 1),
                 current_streak INTEGER NOT NULL DEFAULT 0, last_goal_date TEXT);
             INSERT OR IGNORE INTO streak (id, current_streak) VALUES (1, 0);")?;
-        Ok(Self { db: Arc::new(Mutex::new(conn)), config, http_client: reqwest::Client::new(), provider, model })
+        let identity = std::fs::read_to_string("/home/azureuser/.zeroclaw/workspace/IDENTITY.md")
+            .unwrap_or_default();
+        Ok(Self { db: Arc::new(Mutex::new(conn)), config, http_client: reqwest::Client::new(), provider, model, identity })
     }
 
     pub fn get_state(&self, date: &str) -> Result<ReminderState, WaterReminderError> {
@@ -172,6 +175,8 @@ impl WaterReminderHook {
                 db.execute("UPDATE streak SET current_streak = 0 WHERE id = 1", [])?;
             }
         }
+        // Clear pending state so it does not carry over to next day
+        db.execute("DELETE FROM scheduler_state WHERE key IN (pending_message_id, pending_sent_at, snooze_sent, original_message_id)", [])?;
         Ok(())
     }
 
@@ -193,9 +198,11 @@ impl WaterReminderHook {
         Ok(())
     }
 
+    const LEAVE_DATE_KEY: &'static str = "leave_date";
+
     /// Call provider directly to generate AI text. Returns fallback on failure.
     pub async fn call_ai(&self, prompt: &str) -> String {
-        match self.provider.simple_chat(prompt, &self.model, 0.9).await {
+        match self.provider.chat_with_system(Some(&self.identity), prompt, &self.model, 0.9).await {
             Ok(response) => parse_ai_response(&response),
             Err(e) => {
                 tracing::warn!("water_reminder call_ai error: {e}");
@@ -204,14 +211,106 @@ impl WaterReminderHook {
         }
     }
 
+    fn is_on_leave_today(&self) -> bool {
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        match self.get_scheduler_value(Self::LEAVE_DATE_KEY) {
+            Ok(Some(date_str)) if !date_str.is_empty() => date_str == today,
+            _ => false, // fail-open: DB error or no leave → not on leave
+        }
+    }
+
+    fn is_after_work_end(&self) -> bool {
+        let now_time = chrono::Local::now().time();
+        match self.config.parse_work_end() {
+            Some(end) => now_time >= end,
+            None => false,
+        }
+    }
+
+    async fn handle_leave_command(&self) -> String {
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        let state = self.get_state(&today).ok();
+        let progress = match &state {
+            Some(s) => format!("目前進度：已喝{}口（{}ml / {}ml），連續天數{}天。", s.drink_count, s.ml_consumed(), s.goal_ml, s.current_streak),
+            None => "今日尚未開始喝水。".to_string(),
+        };
+
+        if self.is_on_leave_today() {
+            let prompt = format!("你是小允子。主子剛說了「請假」但今天已經請過假了。{}用甄嬛傳風格回覆，提醒主子已請過假正在休息中，50字以內，帶emoji。只輸出回覆的話。", progress);
+            return self.call_ai(&prompt).await;
+        }
+        if self.is_after_work_end() {
+            let prompt = format!("你是小允子。主子說「請假」但今天提醒時段已經結束了。{}用甄嬛傳風格回覆主子今日提醒已結束，明日再說，50字以內，帶emoji。只輸出回覆的話。", progress);
+            return self.call_ai(&prompt).await;
+        }
+        match self.set_scheduler_value(Self::LEAVE_DATE_KEY, &today) {
+            Ok(_) => {
+                tracing::info!("🚰 Leave set for {today}");
+                let ai_reply = self.call_ai("你是小允子。主子今天請假了。用甄嬛傳風格回覆確認請假，告知今日不再打擾、明早九點半恢復，30字以內，帶emoji。只輸出回覆的話。").await;
+                format!("{}\n\n📊 {}", ai_reply, progress)
+            }
+            Err(e) => {
+                tracing::error!("🚰 Failed to set leave_date: {e}");
+                "奴才辦事不力，請主子稍後再試 😢".to_string()
+            }
+        }
+    }
+
+    async fn handle_unleave_command(&self) -> String {
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        let state = self.get_state(&today).ok();
+        let progress = match &state {
+            Some(s) => format!("目前進度：已喝{}口（{}ml / {}ml），連續天數{}天。", s.drink_count, s.ml_consumed(), s.goal_ml, s.current_streak),
+            None => "今日尚未開始喝水。".to_string(),
+        };
+
+        if !self.is_on_leave_today() {
+            let prompt = format!("你是小允子。主子說「銷假」但今天並未請假。{}用甄嬛傳風格回覆主子並未請假，50字以內，帶emoji。只輸出回覆的話。", progress);
+            return self.call_ai(&prompt).await;
+        }
+        match self.clear_pending(Self::LEAVE_DATE_KEY) {
+            Ok(_) => {
+                tracing::info!("🚰 Leave cleared");
+                let ai_reply = self.call_ai("你是小允子。主子銷假回來了。用甄嬛傳風格歡迎主子回來並表示馬上備水，30字以內，帶emoji。只輸出回覆的話。").await;
+                format!("{}\n\n📊 {}", ai_reply, progress)
+            }
+            Err(e) => {
+                tracing::error!("🚰 Failed to clear leave_date: {e}");
+                "奴才辦事不力，請主子稍後再試 😢".to_string()
+            }
+        }
+    }
+
+    async fn send_telegram_text(&self, text: &str) -> Result<(), WaterReminderError> {
+        let body = serde_json::json!({
+            "chat_id": self.config.chat_id,
+            "text": text,
+        });
+        let _ = self.http_client
+            .post(format!("https://api.telegram.org/bot{}/sendMessage", self.tg_token()))
+            .json(&body)
+            .send()
+            .await;
+        Ok(())
+    }
+
     /// Send a water reminder with inline keyboard
     pub async fn send_reminder(&self, is_snooze: bool) -> Result<(), WaterReminderError> {
         let now = chrono::Local::now();
         let date = now.format("%Y-%m-%d").to_string();
         let state = self.get_state(&date)?;
 
-        // Generate random sip count for this reminder
-        let sips = {
+        // For snooze: reuse original sip count. For new reminder: generate random.
+        let sips = if is_snooze {
+            self.get_scheduler_value("pending_sips")
+                .ok()
+                .flatten()
+                .and_then(|s| s.parse::<u32>().ok())
+                .unwrap_or_else(|| {
+                    use rand::RngExt;
+                    rand::rng().random_range(self.config.min_sips..=self.config.max_sips)
+                })
+        } else {
             use rand::RngExt;
             let mut rng = rand::rng();
             rng.random_range(self.config.min_sips..=self.config.max_sips)
@@ -247,6 +346,9 @@ impl WaterReminderHook {
                 let sent_at = chrono::Utc::now().timestamp();
                 self.set_scheduler_value("pending_sent_at", &sent_at.to_string())?;
                 self.set_scheduler_value("snooze_sent", if is_snooze { "true" } else { "false" })?;
+                if !is_snooze {
+                    self.set_scheduler_value("pending_sips", &sips.to_string())?;
+                }
             }
         }
 
@@ -323,6 +425,11 @@ impl WaterReminderHook {
         let now_time = now.time();
         let now_date = now.date_naive();
         let date_str = now.format("%Y-%m-%d").to_string();
+
+        // Leave guard — skip all reminders if on leave today
+        if self.is_on_leave_today() {
+            return Ok(());
+        }
 
         // Skip weekends
         if !is_weekday(&now_date) {
@@ -453,7 +560,7 @@ impl WaterReminderHook {
     /// Send a "fill water bottle" reminder at start of work day (no inline keyboard)
     pub async fn send_fill_bottle_reminder(&self) -> Result<(), WaterReminderError> {
         let prompt = "你是小允子。現在是上班時間開始，主子剛到辦公室。用甄嬛傳風格提醒主子先去裝水，50字以內，帶一個emoji。只輸出提醒的話。";
-        let ai_text = match self.provider.simple_chat(prompt, &self.model, 0.9).await {
+        let ai_text = match self.provider.chat_with_system(Some(&self.identity), prompt, &self.model, 0.9).await {
             Ok(response) => parse_ai_response(&response),
             Err(_) => "主子，先去裝杯水吧～奴才等您回來 🚰".to_string(),
         };
@@ -496,9 +603,10 @@ impl HookHandler for WaterReminderHook {
         let http_client = self.http_client.clone();
         let provider = Arc::clone(&self.provider);
         let model = self.model.clone();
+        let identity = self.identity.clone();
 
         tokio::spawn(async move {
-            let hook = WaterReminderHook { config, db, http_client, provider, model };
+            let hook = WaterReminderHook { config, db, http_client, provider, model, identity };
             loop {
                 tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
                 if let Err(e) = hook.background_tick().await {
@@ -565,16 +673,55 @@ impl HookHandler for WaterReminderHook {
                 tracing::warn!("water_reminder send_confirmation error: {e}");
             }
 
-            // Also edit original message if this was a snooze confirmation
+            // Also edit the OTHER message (original or snooze) so both show confirmation
             if let Ok(Some(orig_id_str)) = self.get_scheduler_value("original_message_id") {
                 if let Ok(orig_id) = orig_id_str.parse::<i64>() {
-                    if orig_id != message_id {  // Don't edit same message twice
+                    if orig_id != message_id {
                         let _ = self.send_confirmation(chat_id, orig_id, sips).await;
                     }
                 }
                 let _ = self.clear_pending("original_message_id");
             }
+            // If user pressed the ORIGINAL message button, also update the snooze message
+            if !pending_matches {
+                if let Some(snooze_id_str) = &pending_id {
+                    if let Ok(snooze_id) = snooze_id_str.parse::<i64>() {
+                        if snooze_id != message_id {
+                            let _ = self.send_confirmation(chat_id, snooze_id, sips).await;
+                        }
+                    }
+                    let _ = self.clear_pending("pending_message_id");
+                    let _ = self.clear_pending("pending_sent_at");
+                    let _ = self.clear_pending("snooze_sent");
+                }
+            }
         }
+    }
+
+    async fn on_message_received(&self, message: crate::channels::traits::ChannelMessage) -> crate::hooks::traits::HookResult<crate::channels::traits::ChannelMessage> {
+        if !self.config.enabled {
+            return crate::hooks::traits::HookResult::Continue(message);
+        }
+
+        let text = message.content.trim().to_string();
+
+        if text == "請假" || text == "/leave" {
+            let reply = self.handle_leave_command().await;
+            if let Err(e) = self.send_telegram_text(&reply).await {
+                tracing::error!("🚰 Failed to send leave reply: {e}");
+            }
+            return crate::hooks::traits::HookResult::Cancel("water_reminder: leave command handled".to_string());
+        }
+
+        if text == "銷假" || text == "/unleave" {
+            let reply = self.handle_unleave_command().await;
+            if let Err(e) = self.send_telegram_text(&reply).await {
+                tracing::error!("🚰 Failed to send unleave reply: {e}");
+            }
+            return crate::hooks::traits::HookResult::Cancel("water_reminder: unleave command handled".to_string());
+        }
+
+        crate::hooks::traits::HookResult::Continue(message)
     }
 }
 

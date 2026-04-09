@@ -4230,6 +4230,23 @@ pub async fn start_channels(config: Config) -> Result<()> {
                     Err(e) => tracing::warn!("Failed to initialize news monitor: {e}"),
                 }
             }
+            if config.hooks.builtin.email_monitor.enabled {
+                let em_cfg = config.hooks.builtin.email_monitor.clone();
+                let em_config = crate::hooks::builtin::email_monitor::EmailMonitorConfig {
+                    enabled: em_cfg.enabled,
+                    chat_id: em_cfg.chat_id,
+                    check_interval_minutes: em_cfg.check_interval_minutes,
+                    db_path: em_cfg.db_path,
+                    blocked_senders: em_cfg.blocked_senders,
+                };
+                match crate::hooks::builtin::email_monitor::EmailMonitorHook::new(em_config, Arc::clone(&provider), model.clone()) {
+                    Ok(hook) => {
+                        runner.register(Box::new(hook));
+                        tracing::info!("Email monitor hook registered");
+                    }
+                    Err(e) => tracing::warn!("Failed to initialize email monitor: {e}"),
+                }
+            }
             let hooks = Arc::new(runner);
             // Fire gateway_start on channels' hook runner so hooks like
             // water_reminder can spawn their background tasks.

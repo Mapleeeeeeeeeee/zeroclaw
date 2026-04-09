@@ -25,6 +25,7 @@ pub struct ReleaseMonitorHook {
     http_client: reqwest::Client,
     provider: Arc<dyn Provider>,
     model: String,
+    identity: String,
 }
 
 impl ReleaseMonitorHook {
@@ -47,7 +48,9 @@ impl ReleaseMonitorHook {
                 value TEXT NOT NULL
             );"
         )?;
-        Ok(Self { config, db: Arc::new(Mutex::new(conn)), http_client: reqwest::Client::new(), provider, model })
+        let identity = std::fs::read_to_string("/home/azureuser/.zeroclaw/workspace/IDENTITY.md")
+            .unwrap_or_default();
+        Ok(Self { config, db: Arc::new(Mutex::new(conn)), http_client: reqwest::Client::new(), provider, model, identity })
     }
 
     fn get_cached_tag(&self, repo: &str) -> Option<String> {
@@ -191,7 +194,7 @@ impl ReleaseMonitorHook {
             {changelog_truncated}"
         );
 
-        let summary = match self.provider.simple_chat(&prompt, &self.model, 0.7).await {
+        let summary = match self.provider.chat_with_system(Some(&self.identity), &prompt, &self.model, 0.7).await {
             Ok(text) => text.trim().to_string(),
             Err(e) => {
                 tracing::warn!("release_monitor: AI summary failed for {repo}: {e}");
@@ -242,9 +245,10 @@ impl HookHandler for ReleaseMonitorHook {
         let http_client = self.http_client.clone();
         let provider = Arc::clone(&self.provider);
         let model = self.model.clone();
+        let identity = self.identity.clone();
 
         tokio::spawn(async move {
-            let hook = ReleaseMonitorHook { config, db, http_client, provider, model };
+            let hook = ReleaseMonitorHook { config, db, http_client, provider, model, identity };
             loop {
                 tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
                 if let Err(e) = hook.background_tick().await {

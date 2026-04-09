@@ -19,6 +19,7 @@ pub struct NewsMonitorHook {
     http_client: reqwest::Client,
     provider: Arc<dyn Provider>,
     model: String,
+    identity: String,
 }
 
 impl NewsMonitorHook {
@@ -42,6 +43,8 @@ impl NewsMonitorHook {
                 value TEXT NOT NULL
             );"
         )?;
+        let identity = std::fs::read_to_string("/home/azureuser/.zeroclaw/workspace/IDENTITY.md")
+            .unwrap_or_default();
         Ok(Self {
             config,
             db: Arc::new(Mutex::new(conn)),
@@ -51,6 +54,7 @@ impl NewsMonitorHook {
                 .build()?,
             provider,
             model,
+            identity,
         })
     }
 
@@ -262,7 +266,7 @@ impl NewsMonitorHook {
             只用 <b> 和 <code> 標籤。\n\n\
             {article_text}"
         );
-        match self.provider.simple_chat(&prompt, &self.model, 0.7).await {
+        match self.provider.chat_with_system(Some(&self.identity), &prompt, &self.model, 0.7).await {
             Ok(text) => text.trim().to_string(),
             Err(e) => {
                 tracing::warn!("news_monitor: AI summary failed for {url}: {e}");
@@ -320,6 +324,95 @@ impl NewsMonitorHook {
         if let Err(e) = self.process_articles("Anthropic", anthropic_articles).await {
             tracing::warn!("news_monitor: error processing Anthropic articles: {e}");
         }
+        if let Err(e) = self.check_dia_changelog().await {
+            tracing::warn!("news_monitor: error checking Dia changelog: {e}");
+        }
+        Ok(())
+    }
+
+
+    async fn check_dia_changelog(&self) -> Result<(), anyhow::Error> {
+        // Use Jina Reader to bypass Cloudflare
+        let jina_url = "https://r.jina.ai/https://www.diabrowser.com/release-notes/latest";
+        let resp = match self.http_client
+            .get(jina_url)
+            .header("Accept", "text/plain")
+            .send().await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!("dia_monitor: fetch error: {e}");
+                return Ok(());
+            }
+        };
+        let text = resp.text().await.unwrap_or_default();
+        if text.is_empty() || text.len() < 50 {
+            tracing::warn!("dia_monitor: empty or too short response");
+            return Ok(());
+        }
+
+        // Extract the first ## heading as release identifier
+        let release_id = text.lines()
+            .find(|l| l.starts_with("## "))
+            .map(|l| l.trim().to_string())
+            .unwrap_or_default();
+        if release_id.is_empty() {
+            tracing::warn!("dia_monitor: could not find release heading");
+            return Ok(());
+        }
+
+        // Compare with DB
+        let last_id = self.get_state("dia_last_release_id").unwrap_or_default();
+        if last_id == release_id {
+            return Ok(()); // No new release
+        }
+
+        // First run: silently cache
+        if last_id.is_empty() {
+            tracing::info!("dia_monitor: first run, caching release: {release_id}");
+            self.set_state("dia_last_release_id", &release_id)?;
+            return Ok(());
+        }
+
+        tracing::info!("dia_monitor: new release detected: {release_id} (was: {last_id})");
+
+        // Truncate content for LLM
+        let content_for_llm: String = text.chars().take(2000).collect();
+
+        // LLM judges if target features exist
+        let prompt = format!(
+            "以下是 Dia 瀏覽器的最新更新日誌：\n\n{}\n\n使用者想知道有沒有以下功能：\n1. 左右滑動切換 Space（Spaces 功能，類似 Arc 的 Space，可以用手勢左右滑動切換不同工作空間）\n2. 底部快速換列（底部有列表或 dock 可以快速切換 Space/Tab Group）\n\n如果有任何一個相關功能，用繁體中文回覆具體更新了什麼（50字以內）。如果完全沒有相關功能，只回覆 NONE 這個字。",
+            content_for_llm
+        );
+
+        let reply = match self.provider.chat_with_system(
+            Some(&self.identity), &prompt, &self.model, 0.3
+        ).await {
+            Ok(r) => r.trim().to_string(),
+            Err(e) => {{
+                tracing::warn!("dia_monitor: LLM error: {{e}}");
+                self.set_state("dia_last_release_id", &release_id)?;
+                return Ok(());
+            }}
+        };
+
+        // Update DB
+        self.set_state("dia_last_release_id", &release_id)?;
+
+        // Check if should notify
+        let trimmed = reply.trim();
+        if trimmed == "NONE" || trimmed.is_empty() || trimmed.starts_with("NONE") {
+            tracing::info!("dia_monitor: no target features in this release, skipping");
+            return Ok(());
+        }
+
+        // Send notification
+        let message = format!(
+            "🌐 <b>Dia Browser 更新：你要的功能來了！</b>\n\n{}\n\n🔗 https://www.diabrowser.com/release-notes/latest",
+            trimmed
+        );
+        self.send_tg_html(&message).await;
+        tracing::info!("dia_monitor: sent notification for release: {release_id}");
+
         Ok(())
     }
 
@@ -354,9 +447,10 @@ impl HookHandler for NewsMonitorHook {
         let http_client = self.http_client.clone();
         let provider = Arc::clone(&self.provider);
         let model = self.model.clone();
+        let identity = self.identity.clone();
 
         tokio::spawn(async move {
-            let hook = NewsMonitorHook { config, db, http_client, provider, model };
+            let hook = NewsMonitorHook { config, db, http_client, provider, model, identity };
             loop {
                 tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
                 if let Err(e) = hook.background_tick().await {

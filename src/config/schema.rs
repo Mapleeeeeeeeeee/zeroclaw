@@ -3519,6 +3519,11 @@ pub struct BuiltinHooksConfig {
     /// AI-summarised Telegram notifications for new articles.
     #[serde(default)]
     pub news_monitor: NewsMonitorConfig,
+    /// Configuration for the email-monitor hook.
+    ///
+    /// When enabled, polls Gmail via gws and sends Telegram notifications for new emails.
+    #[serde(default)]
+    pub email_monitor: EmailMonitorConfig,
 }
 
 /// Configuration for the webhook-audit builtin hook.
@@ -3713,6 +3718,45 @@ impl Default for NewsMonitorConfig {
             chat_id: String::new(),
             check_interval_minutes: default_news_check_interval(),
             db_path: default_news_db_path(),
+        }
+    }
+}
+
+// -- Email Monitor Hook Config -------------------------------------------
+
+fn default_email_check_interval() -> u32 { 3 }
+fn default_email_db_path() -> String { "/home/azureuser/.email-monitor/emails.db".to_string() }
+fn default_email_blocked_senders() -> Vec<String> {
+    vec![
+        "noreply-apps-scripts-notifications@google.com".to_string(),
+        "messages-noreply@linkedin.com".to_string(),
+        "no-reply@linebizsolutions.com".to_string(),
+    ]
+}
+
+/// Configuration for the email-monitor builtin hook.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct EmailMonitorConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub chat_id: String,
+    #[serde(default = "default_email_check_interval")]
+    pub check_interval_minutes: u32,
+    #[serde(default = "default_email_db_path")]
+    pub db_path: String,
+    #[serde(default = "default_email_blocked_senders")]
+    pub blocked_senders: Vec<String>,
+}
+
+impl Default for EmailMonitorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            chat_id: String::new(),
+            check_interval_minutes: default_email_check_interval(),
+            db_path: default_email_db_path(),
+            blocked_senders: default_email_blocked_senders(),
         }
     }
 }
