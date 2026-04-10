@@ -5,7 +5,7 @@
 use super::AppState;
 use axum::{
     extract::{Path, Query, State},
-    http::{HeaderMap, StatusCode, header},
+    http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Json},
 };
 use serde::Deserialize;
@@ -781,6 +781,52 @@ pub async fn handle_api_cli_tools(
     Json(serde_json::json!({"cli_tools": tools})).into_response()
 }
 
+/// GET /api/channels — detailed channel list for dashboard Channels tab
+pub async fn handle_api_channels(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+
+    let config = state.config.lock().clone();
+    let health = crate::health::snapshot();
+
+    let channels: Vec<serde_json::Value> = config
+        .channels_config
+        .channels()
+        .into_iter()
+        .map(|(handle, present)| {
+            let name = handle.name().to_string();
+
+            // Derive status and health from the health registry component, if registered.
+            let component = health.components.get(&name);
+            let (status, channel_health) = match component {
+                Some(c) if c.status == "ok" => ("active", "healthy"),
+                Some(c) if c.status == "error" => ("error", "down"),
+                Some(_) => ("inactive", "degraded"),
+                None if present => ("inactive", "healthy"),
+                None => ("inactive", "down"),
+            };
+
+            let last_message_at = component.and_then(|c| c.last_ok.clone());
+
+            serde_json::json!({
+                "name": name,
+                "type": name,
+                "enabled": present,
+                "status": status,
+                "message_count": 0,
+                "last_message_at": last_message_at,
+                "health": channel_health,
+            })
+        })
+        .collect();
+
+    Json(serde_json::json!({ "channels": channels })).into_response()
+}
+
 /// GET /api/health — component health snapshot
 pub async fn handle_api_health(
     State(state): State<AppState>,
@@ -1537,7 +1583,7 @@ pub async fn handle_claude_code_hook(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gateway::{AppState, GatewayRateLimiter, IdempotencyStore, nodes};
+    use crate::gateway::{nodes, AppState, GatewayRateLimiter, IdempotencyStore};
     use crate::memory::{Memory, MemoryCategory, MemoryEntry};
     use crate::providers::Provider;
     use crate::security::pairing::PairingGuard;
@@ -2076,18 +2122,14 @@ mod tests {
             Some("route-embed-key-1")
         );
         assert_eq!(hydrated.embedding_routes[2].api_key, None);
-        assert!(
-            hydrated
-                .model_routes
-                .iter()
-                .all(|route| route.api_key.as_deref() != Some(MASKED_SECRET))
-        );
-        assert!(
-            hydrated
-                .embedding_routes
-                .iter()
-                .all(|route| route.api_key.as_deref() != Some(MASKED_SECRET))
-        );
+        assert!(hydrated
+            .model_routes
+            .iter()
+            .all(|route| route.api_key.as_deref() != Some(MASKED_SECRET)));
+        assert!(hydrated
+            .embedding_routes
+            .iter()
+            .all(|route| route.api_key.as_deref() != Some(MASKED_SECRET)));
     }
 
     #[tokio::test]
@@ -2209,12 +2251,10 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         let json = response_json(response).await;
-        assert!(
-            json["error"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("delivery.to is required")
-        );
+        assert!(json["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("delivery.to is required"));
 
         let config = state.config.lock().clone();
         assert!(crate::cron::list_jobs(&config).unwrap().is_empty());
@@ -2253,14 +2293,58 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         let json = response_json(response).await;
-        assert!(
-            json["error"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("unsupported delivery channel")
-        );
+        assert!(json["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("unsupported delivery channel"));
 
         let config = state.config.lock().clone();
         assert!(crate::cron::list_jobs(&config).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn channels_endpoint_returns_all_configured_channels() {
+        let mut cfg = crate::config::Config::default();
+        cfg.channels_config.telegram = Some(crate::config::schema::TelegramConfig {
+            bot_token: "test-token".to_string(),
+            allowed_users: vec!["*".to_string()],
+            stream_mode: Default::default(),
+            draft_update_interval_ms: 1500,
+            interrupt_on_new_message: false,
+            mention_only: false,
+            ack_reactions: None,
+            proxy_url: None,
+        });
+
+        let state = test_state(cfg);
+        let headers = HeaderMap::new();
+
+        let response = handle_api_channels(State(state), headers)
+            .await
+            .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let json = response_json(response).await;
+        let channels = json["channels"]
+            .as_array()
+            .expect("channels should be array");
+
+        // Should have all channel types from ChannelsConfig::channels()
+        assert!(!channels.is_empty(), "channels list should not be empty");
+
+        // Telegram should be enabled
+        let telegram = channels
+            .iter()
+            .find(|c| c["name"] == "Telegram")
+            .expect("Telegram channel should be present");
+        assert_eq!(telegram["enabled"], true);
+        assert_eq!(telegram["type"], "Telegram");
+
+        // Discord should be present but not enabled (not configured)
+        let discord = channels
+            .iter()
+            .find(|c| c["name"] == "Discord")
+            .expect("Discord channel should be present");
+        assert_eq!(discord["enabled"], false);
     }
 }
