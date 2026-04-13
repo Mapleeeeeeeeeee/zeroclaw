@@ -4197,6 +4197,7 @@ pub async fn start_channels(config: Config) -> Result<()> {
                     chat_id: rm_cfg.chat_id,
                     check_interval_minutes: rm_cfg.check_interval_minutes,
                     db_path: rm_cfg.db_path,
+                    repos: rm_cfg.repos,
                 };
                 match crate::hooks::builtin::release_monitor::ReleaseMonitorHook::new(
                     rm_hook_config,

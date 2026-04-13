@@ -3660,6 +3660,14 @@ impl Default for WaterReminderConfig {
 
 fn default_release_check_interval() -> u32 { 60 }
 fn default_release_db_path() -> String { "/home/azureuser/.release-monitor/releases.db".to_string() }
+fn default_release_repos() -> Vec<String> {
+    vec![
+        "anthropics/claude-code".to_string(),
+        "google-gemini/gemini-cli".to_string(),
+        "openai/codex".to_string(),
+        "github/copilot-cli".to_string(),
+    ]
+}
 
 /// Configuration for the release-monitor builtin hook.
 ///
@@ -3679,6 +3687,9 @@ pub struct ReleaseMonitorConfig {
     /// Path to the SQLite database file used for caching seen release tags.
     #[serde(default = "default_release_db_path")]
     pub db_path: String,
+    /// GitHub repos to watch for new releases (format: "owner/name").
+    #[serde(default = "default_release_repos")]
+    pub repos: Vec<String>,
 }
 
 impl Default for ReleaseMonitorConfig {
@@ -3688,6 +3699,7 @@ impl Default for ReleaseMonitorConfig {
             chat_id: String::new(),
             check_interval_minutes: default_release_check_interval(),
             db_path: default_release_db_path(),
+            repos: default_release_repos(),
         }
     }
 }
@@ -12058,5 +12070,42 @@ require_otp_to_resume = true
             debug_output.contains("[REDACTED]"),
             "Debug output must show [REDACTED] for client_secret"
         );
+    }
+
+    #[test]
+    async fn release_monitor_default_repos_includes_all_four_cli_tools() {
+        let config = ReleaseMonitorConfig::default();
+        assert_eq!(config.repos.len(), 4, "expected 4 default repos, got {}: {:?}", config.repos.len(), config.repos);
+        assert!(config.repos.contains(&"anthropics/claude-code".to_string()));
+        assert!(config.repos.contains(&"google-gemini/gemini-cli".to_string()));
+        assert!(config.repos.contains(&"openai/codex".to_string()));
+        assert!(config.repos.contains(&"github/copilot-cli".to_string()),
+            "github/copilot-cli must be in defaults");
+    }
+
+    #[test]
+    async fn release_monitor_config_accepts_custom_repo_list() {
+        let toml = r#"
+            enabled = true
+            chat_id = "-1234567890"
+            check_interval_minutes = 30
+            db_path = "/tmp/test.db"
+            repos = ["foo/bar", "baz/qux"]
+        "#;
+        let config: ReleaseMonitorConfig = toml::from_str(toml).expect("parse");
+        assert_eq!(config.repos, vec!["foo/bar".to_string(), "baz/qux".to_string()]);
+        assert_eq!(config.check_interval_minutes, 30);
+    }
+
+    #[test]
+    async fn release_monitor_config_omitting_repos_falls_back_to_default() {
+        let toml = r#"
+            enabled = true
+            chat_id = "-1"
+        "#;
+        let config: ReleaseMonitorConfig = toml::from_str(toml).expect("parse");
+        // When `repos` is omitted, serde should use default_release_repos().
+        assert_eq!(config.repos.len(), 4);
+        assert!(config.repos.contains(&"github/copilot-cli".to_string()));
     }
 }

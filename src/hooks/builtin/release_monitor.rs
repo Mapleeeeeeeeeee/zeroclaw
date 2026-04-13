@@ -5,18 +5,13 @@ use rusqlite::Connection;
 use crate::hooks::traits::HookHandler;
 use crate::providers::Provider;
 
-const REPOS: &[&str] = &[
-    "anthropics/claude-code",
-    "google-gemini/gemini-cli",
-    "openai/codex",
-];
-
 #[derive(Debug, Clone)]
 pub struct ReleaseMonitorConfig {
     pub enabled: bool,
     pub chat_id: String,
     pub check_interval_minutes: u32,
     pub db_path: String,
+    pub repos: Vec<String>,
 }
 
 pub struct ReleaseMonitorHook {
@@ -122,9 +117,9 @@ impl ReleaseMonitorHook {
     }
 
     async fn check_releases(&self) -> Result<(), anyhow::Error> {
-        let futures: Vec<_> = REPOS.iter().map(|repo| self.check_repo(repo)).collect();
+        let futures: Vec<_> = self.config.repos.iter().map(|repo| self.check_repo(repo)).collect();
         let results = futures_util::future::join_all(futures).await;
-        for (repo, result) in REPOS.iter().zip(results) {
+        for (repo, result) in self.config.repos.iter().zip(results) {
             if let Err(e) = result {
                 tracing::warn!("release_monitor: error checking {repo}: {e}");
             }
@@ -238,7 +233,7 @@ impl HookHandler for ReleaseMonitorHook {
             return;
         }
         tracing::info!("📦 ReleaseMonitorHook registered (interval: {}min, repos: {})",
-            self.config.check_interval_minutes, REPOS.len());
+            self.config.check_interval_minutes, self.config.repos.len());
 
         let config = self.config.clone();
         let db = Arc::clone(&self.db);
