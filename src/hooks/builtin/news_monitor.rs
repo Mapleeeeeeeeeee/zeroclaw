@@ -2,15 +2,36 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use parking_lot::Mutex;
 use rusqlite::Connection;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use crate::hooks::traits::HookHandler;
 use crate::providers::Provider;
 
-#[derive(Debug, Clone)]
+fn default_news_check_interval() -> u32 { 5 }
+fn default_news_db_path() -> String { "/home/azureuser/.news-monitor/news.db".to_string() }
+
+/// Configuration for the news-monitor builtin hook.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct NewsMonitorConfig {
+    #[serde(default)]
     pub enabled: bool,
+    #[serde(default)]
     pub chat_id: String,
+    #[serde(default = "default_news_check_interval")]
     pub check_interval_minutes: u32,
+    #[serde(default = "default_news_db_path")]
     pub db_path: String,
+}
+
+impl Default for NewsMonitorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            chat_id: String::new(),
+            check_interval_minutes: default_news_check_interval(),
+            db_path: default_news_db_path(),
+        }
+    }
 }
 
 pub struct NewsMonitorHook {
@@ -499,21 +520,21 @@ pub fn register(
     provider: &std::sync::Arc<dyn crate::providers::Provider>,
     model: &str,
 ) {
-    if config.hooks.builtin.news_monitor.enabled {
-        let nm_cfg = config.hooks.builtin.news_monitor.clone();
-        let nm_config = NewsMonitorConfig {
-            enabled: nm_cfg.enabled,
-            chat_id: nm_cfg.chat_id,
-            check_interval_minutes: nm_cfg.check_interval_minutes,
-            db_path: nm_cfg.db_path,
-        };
-        match NewsMonitorHook::new(nm_config, Arc::clone(provider), model.to_string()) {
-            Ok(hook) => {
-                runner.register(Box::new(hook));
-                tracing::info!("News monitor hook registered");
-            }
-            Err(e) => tracing::warn!("Failed to initialize news monitor: {e}"),
+    let Some(value) = config.hooks.builtin.extra.get("news_monitor") else { return; };
+    let nm_config: NewsMonitorConfig = match value.clone().try_into() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!("news_monitor: invalid config: {e}");
+            return;
         }
+    };
+    if !nm_config.enabled { return; }
+    match NewsMonitorHook::new(nm_config, Arc::clone(provider), model.to_string()) {
+        Ok(hook) => {
+            runner.register(Box::new(hook));
+            tracing::info!("News monitor hook registered");
+        }
+        Err(e) => tracing::warn!("Failed to initialize news monitor: {e}"),
     }
 }
 

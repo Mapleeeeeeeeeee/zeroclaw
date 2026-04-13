@@ -2,16 +2,55 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use parking_lot::Mutex;
 use rusqlite::Connection;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use crate::hooks::traits::HookHandler;
 use crate::providers::Provider;
 
-#[derive(Debug, Clone)]
+fn default_release_check_interval() -> u32 { 60 }
+fn default_release_db_path() -> String { "/home/azureuser/.release-monitor/releases.db".to_string() }
+fn default_release_repos() -> Vec<String> {
+    vec![
+        "anthropics/claude-code".to_string(),
+        "google-gemini/gemini-cli".to_string(),
+        "openai/codex".to_string(),
+        "github/copilot-cli".to_string(),
+    ]
+}
+
+/// Configuration for the release-monitor builtin hook.
+///
+/// When enabled, polls GitHub releases for the configured repos at a regular
+/// interval and sends Telegram notifications with AI-generated summaries.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ReleaseMonitorConfig {
+    /// Enable the release-monitor hook. Default: .
+    #[serde(default)]
     pub enabled: bool,
+    /// Telegram chat ID to send release notifications to.
+    #[serde(default)]
     pub chat_id: String,
+    /// How often to check for new releases, in minutes. Default: .
+    #[serde(default = "default_release_check_interval")]
     pub check_interval_minutes: u32,
+    /// Path to the SQLite database file used for caching seen release tags.
+    #[serde(default = "default_release_db_path")]
     pub db_path: String,
+    /// GitHub repos to watch for new releases (format: "owner/name").
+    #[serde(default = "default_release_repos")]
     pub repos: Vec<String>,
+}
+
+impl Default for ReleaseMonitorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            chat_id: String::new(),
+            check_interval_minutes: default_release_check_interval(),
+            db_path: default_release_db_path(),
+            repos: default_release_repos(),
+        }
+    }
 }
 
 pub struct ReleaseMonitorHook {
@@ -260,21 +299,83 @@ pub fn register(
     provider: &std::sync::Arc<dyn crate::providers::Provider>,
     model: &str,
 ) {
-    if config.hooks.builtin.release_monitor.enabled {
-        let rm_cfg = config.hooks.builtin.release_monitor.clone();
-        let rm_hook_config = ReleaseMonitorConfig {
-            enabled: rm_cfg.enabled,
-            chat_id: rm_cfg.chat_id,
-            check_interval_minutes: rm_cfg.check_interval_minutes,
-            db_path: rm_cfg.db_path,
-            repos: rm_cfg.repos,
-        };
-        match ReleaseMonitorHook::new(rm_hook_config, Arc::clone(provider), model.to_string()) {
-            Ok(hook) => {
-                runner.register(Box::new(hook));
-                tracing::info!("ð¦ Release monitor hook registered");
-            }
-            Err(e) => tracing::warn!("Failed to initialize release monitor: {e}"),
+    let Some(value) = config.hooks.builtin.extra.get("release_monitor") else { return; };
+    let rm_config: ReleaseMonitorConfig = match value.clone().try_into() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!("release_monitor: invalid config: {e}");
+            return;
         }
+    };
+    if !rm_config.enabled { return; }
+    match ReleaseMonitorHook::new(rm_config, Arc::clone(provider), model.to_string()) {
+        Ok(hook) => {
+            runner.register(Box::new(hook));
+            tracing::info!("ð¦ Release monitor hook registered");
+        }
+        Err(e) => tracing::warn!("Failed to initialize release monitor: {e}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn release_monitor_default_repos_includes_all_four_cli_tools() {
+        let config = ReleaseMonitorConfig::default();
+        assert_eq!(config.repos.len(), 4, "expected 4 default repos, got {}: {:?}", config.repos.len(), config.repos);
+        assert!(config.repos.contains(&"anthropics/claude-code".to_string()));
+        assert!(config.repos.contains(&"google-gemini/gemini-cli".to_string()));
+        assert!(config.repos.contains(&"openai/codex".to_string()));
+        assert!(config.repos.contains(&"github/copilot-cli".to_string()),
+            "github/copilot-cli must be in defaults");
+    }
+
+    #[test]
+    fn release_monitor_config_accepts_custom_repo_list() {
+        let toml = r#"
+            enabled = true
+            chat_id = "-1234567890"
+            check_interval_minutes = 30
+            db_path = "/tmp/test.db"
+            repos = ["foo/bar", "baz/qux"]
+        "#;
+        let config: ReleaseMonitorConfig = toml::from_str(toml).expect("parse");
+        assert_eq!(config.repos, vec!["foo/bar".to_string(), "baz/qux".to_string()]);
+        assert_eq!(config.check_interval_minutes, 30);
+    }
+
+    #[test]
+    fn release_monitor_config_omitting_repos_falls_back_to_default() {
+        let toml = r#"
+            enabled = true
+            chat_id = "-1"
+        "#;
+        let config: ReleaseMonitorConfig = toml::from_str(toml).expect("parse");
+        // When `repos` is omitted, serde should use default_release_repos().
+        assert_eq!(config.repos.len(), 4);
+        assert!(config.repos.contains(&"github/copilot-cli".to_string()));
+    }
+
+    #[test]
+    fn release_monitor_parses_from_builtin_hooks_extra() {
+        let toml = r#"
+[hooks]
+enabled = true
+
+[hooks.builtin]
+command_logger = true
+
+[hooks.builtin.release_monitor]
+enabled = true
+chat_id = "-1"
+"#;
+        let parsed: crate::config::schema::Config = toml::from_str(toml).expect("parse full config");
+        let rm_value = parsed.hooks.builtin.extra.get("release_monitor")
+            .expect("release_monitor section must land in extra");
+        let rm: ReleaseMonitorConfig = rm_value.clone().try_into().expect("decode config");
+        assert!(rm.enabled);
+        assert_eq!(rm.chat_id, "-1");
     }
 }

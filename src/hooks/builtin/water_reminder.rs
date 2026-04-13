@@ -5,26 +5,94 @@ use async_trait::async_trait;
 use chrono::{Datelike, NaiveDate, NaiveTime};
 use parking_lot::Mutex;
 use rusqlite::Connection;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 
 use crate::hooks::traits::HookHandler;
 use crate::providers::Provider;
 
-#[derive(Debug, Clone)]
+fn default_water_daily_goal() -> i32 { 2000 }
+fn default_water_per_sip() -> i32 { 30 }
+fn default_water_min_sips() -> u32 { 5 }
+fn default_water_max_sips() -> u32 { 8 }
+fn default_water_work_start() -> String { "01:30".to_string() }
+fn default_water_work_end() -> String { "10:30".to_string() }
+fn default_water_lunch_start() -> String { "04:30".to_string() }
+fn default_water_lunch_end() -> String { "05:30".to_string() }
+fn default_water_interval_min() -> u32 { 20 }
+fn default_water_interval_max() -> u32 { 35 }
+fn default_water_snooze() -> u64 { 180 }
+fn default_water_db_path() -> String { "/home/azureuser/.water-reminder/water.db".to_string() }
+
+/// Configuration for the water-reminder builtin hook.
+///
+/// When enabled, sends periodic hydration reminders via Telegram and tracks
+/// daily intake using a local SQLite database.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct WaterReminderConfig {
+    /// Enable the water-reminder hook. Default: `false`.
+    #[serde(default)]
     pub enabled: bool,
+    /// Telegram chat ID to send reminders to.
+    #[serde(default)]
     pub chat_id: String,
+    /// Daily water intake goal in millilitres. Default: `2000`.
+    #[serde(default = "default_water_daily_goal")]
     pub daily_goal_ml: i32,
+    /// Millilitres per sip/drink unit. Default: `30`.
+    #[serde(default = "default_water_per_sip")]
     pub per_drink_ml: i32,
+    /// Minimum sips per reminder. Default: `5`.
+    #[serde(default = "default_water_min_sips")]
     pub min_sips: u32,
+    /// Maximum sips per reminder. Default: `8`.
+    #[serde(default = "default_water_max_sips")]
     pub max_sips: u32,
+    /// Work start time (HH:MM, UTC). Default: `"01:30"`.
+    #[serde(default = "default_water_work_start")]
     pub work_start: String,
+    /// Work end time (HH:MM, UTC). Default: `"10:30"`.
+    #[serde(default = "default_water_work_end")]
     pub work_end: String,
+    /// Lunch window start (HH:MM, UTC). Default: `"04:30"`.
+    #[serde(default = "default_water_lunch_start")]
     pub lunch_start: String,
+    /// Lunch window end (HH:MM, UTC). Default: `"05:30"`.
+    #[serde(default = "default_water_lunch_end")]
     pub lunch_end: String,
+    /// Minimum interval between reminders (minutes). Default: `20`.
+    #[serde(default = "default_water_interval_min")]
     pub interval_min_minutes: u32,
+    /// Maximum interval between reminders (minutes). Default: `35`.
+    #[serde(default = "default_water_interval_max")]
     pub interval_max_minutes: u32,
+    /// Seconds to wait before sending a snooze reminder. Default: `180`.
+    #[serde(default = "default_water_snooze")]
     pub snooze_wait_seconds: u64,
+    /// Path to the SQLite database file. Default: `~/.water-reminder/water.db`.
+    #[serde(default = "default_water_db_path")]
     pub db_path: String,
+}
+
+impl Default for WaterReminderConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            chat_id: String::new(),
+            daily_goal_ml: default_water_daily_goal(),
+            per_drink_ml: default_water_per_sip(),
+            min_sips: default_water_min_sips(),
+            max_sips: default_water_max_sips(),
+            work_start: default_water_work_start(),
+            work_end: default_water_work_end(),
+            lunch_start: default_water_lunch_start(),
+            lunch_end: default_water_lunch_end(),
+            interval_min_minutes: default_water_interval_min(),
+            interval_max_minutes: default_water_interval_max(),
+            snooze_wait_seconds: default_water_snooze(),
+            db_path: default_water_db_path(),
+        }
+    }
 }
 
 impl WaterReminderConfig {
@@ -799,31 +867,21 @@ pub fn register(
     provider: &std::sync::Arc<dyn crate::providers::Provider>,
     model: &str,
 ) {
-    if config.hooks.builtin.water_reminder.enabled {
-        let wr_cfg = config.hooks.builtin.water_reminder.clone();
-        let wr_hook_config = WaterReminderConfig {
-            enabled: wr_cfg.enabled,
-            chat_id: wr_cfg.chat_id,
-            daily_goal_ml: wr_cfg.daily_goal_ml,
-            per_drink_ml: wr_cfg.per_drink_ml,
-            min_sips: wr_cfg.min_sips,
-            max_sips: wr_cfg.max_sips,
-            work_start: wr_cfg.work_start,
-            work_end: wr_cfg.work_end,
-            lunch_start: wr_cfg.lunch_start,
-            lunch_end: wr_cfg.lunch_end,
-            interval_min_minutes: wr_cfg.interval_min_minutes,
-            interval_max_minutes: wr_cfg.interval_max_minutes,
-            snooze_wait_seconds: wr_cfg.snooze_wait_seconds,
-            db_path: wr_cfg.db_path,
-        };
-        match WaterReminderHook::new(wr_hook_config, Arc::clone(provider), model.to_string()) {
-            Ok(hook) => {
-                runner.register(Box::new(hook));
-                tracing::info!("🚰 Water reminder hook registered");
-            }
-            Err(e) => tracing::warn!("Failed to initialize water reminder: {e}"),
+    let Some(value) = config.hooks.builtin.extra.get("water_reminder") else { return; };
+    let wr_config: WaterReminderConfig = match value.clone().try_into() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!("water_reminder: invalid config: {e}");
+            return;
         }
+    };
+    if !wr_config.enabled { return; }
+    match WaterReminderHook::new(wr_config, Arc::clone(provider), model.to_string()) {
+        Ok(hook) => {
+            runner.register(Box::new(hook));
+            tracing::info!("🚰 Water reminder hook registered");
+        }
+        Err(e) => tracing::warn!("Failed to initialize water reminder: {e}"),
     }
 }
 

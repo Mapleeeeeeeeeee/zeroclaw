@@ -2,16 +2,46 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use parking_lot::Mutex;
 use rusqlite::Connection;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use crate::hooks::traits::HookHandler;
 use crate::providers::Provider;
 
-#[derive(Debug, Clone)]
+fn default_email_check_interval() -> u32 { 3 }
+fn default_email_db_path() -> String { "/home/azureuser/.email-monitor/emails.db".to_string() }
+fn default_email_blocked_senders() -> Vec<String> {
+    vec![
+        "noreply-apps-scripts-notifications@google.com".to_string(),
+        "messages-noreply@linkedin.com".to_string(),
+        "no-reply@linebizsolutions.com".to_string(),
+    ]
+}
+
+/// Configuration for the email-monitor builtin hook.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct EmailMonitorConfig {
+    #[serde(default)]
     pub enabled: bool,
+    #[serde(default)]
     pub chat_id: String,
+    #[serde(default = "default_email_check_interval")]
     pub check_interval_minutes: u32,
+    #[serde(default = "default_email_db_path")]
     pub db_path: String,
+    #[serde(default = "default_email_blocked_senders")]
     pub blocked_senders: Vec<String>,
+}
+
+impl Default for EmailMonitorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            chat_id: String::new(),
+            check_interval_minutes: default_email_check_interval(),
+            db_path: default_email_db_path(),
+            blocked_senders: default_email_blocked_senders(),
+        }
+    }
 }
 
 pub struct EmailMonitorHook {
@@ -438,21 +468,20 @@ pub fn register(
     provider: &std::sync::Arc<dyn crate::providers::Provider>,
     model: &str,
 ) {
-    if config.hooks.builtin.email_monitor.enabled {
-        let em_cfg = config.hooks.builtin.email_monitor.clone();
-        let em_config = EmailMonitorConfig {
-            enabled: em_cfg.enabled,
-            chat_id: em_cfg.chat_id,
-            check_interval_minutes: em_cfg.check_interval_minutes,
-            db_path: em_cfg.db_path,
-            blocked_senders: em_cfg.blocked_senders,
-        };
-        match EmailMonitorHook::new(em_config, Arc::clone(provider), model.to_string()) {
-            Ok(hook) => {
-                runner.register(Box::new(hook));
-                tracing::info!("Email monitor hook registered");
-            }
-            Err(e) => tracing::warn!("Failed to initialize email monitor: {e}"),
+    let Some(value) = config.hooks.builtin.extra.get("email_monitor") else { return; };
+    let em_config: EmailMonitorConfig = match value.clone().try_into() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!("email_monitor: invalid config: {e}");
+            return;
         }
+    };
+    if !em_config.enabled { return; }
+    match EmailMonitorHook::new(em_config, Arc::clone(provider), model.to_string()) {
+        Ok(hook) => {
+            runner.register(Box::new(hook));
+            tracing::info!("Email monitor hook registered");
+        }
+        Err(e) => tracing::warn!("Failed to initialize email monitor: {e}"),
     }
 }
