@@ -7,6 +7,8 @@ use serde::{Deserialize, Serialize};
 use crate::hooks::traits::HookHandler;
 use crate::providers::Provider;
 
+pub(super) const SECTION_NAME: &str = "news_monitor";
+
 fn default_news_check_interval() -> u32 { 5 }
 fn default_news_db_path() -> String { "/home/azureuser/.news-monitor/news.db".to_string() }
 
@@ -41,10 +43,11 @@ pub struct NewsMonitorHook {
     provider: Arc<dyn Provider>,
     model: String,
     identity: String,
+    tg_token: String,
 }
 
 impl NewsMonitorHook {
-    pub fn new(config: NewsMonitorConfig, provider: Arc<dyn Provider>, model: String) -> Result<Self, anyhow::Error> {
+    pub fn new(config: NewsMonitorConfig, workspace_dir: &std::path::Path, identity: String, provider: Arc<dyn Provider>, model: String) -> Result<Self, anyhow::Error> {
         if config.db_path != ":memory:" {
             if let Some(parent) = std::path::Path::new(&config.db_path).parent() {
                 if !parent.as_os_str().is_empty() {
@@ -64,8 +67,7 @@ impl NewsMonitorHook {
                 value TEXT NOT NULL
             );"
         )?;
-        let identity = std::fs::read_to_string("/home/azureuser/.zeroclaw/workspace/IDENTITY.md")
-            .unwrap_or_default();
+        let tg_token = super::env_loader::load_env_value(workspace_dir, "TG_BOT_TOKEN")?;
         Ok(Self {
             config,
             db: Arc::new(Mutex::new(conn)),
@@ -76,6 +78,7 @@ impl NewsMonitorHook {
             provider,
             model,
             identity,
+            tg_token,
         })
     }
 
@@ -122,9 +125,8 @@ impl NewsMonitorHook {
         Ok(())
     }
 
-    fn tg_token(&self) -> String {
-        std::env::var("TG_BOT_TOKEN")
-            .unwrap_or_else(|_| "<REDACTED>".to_string())
+    fn tg_token(&self) -> &str {
+        &self.tg_token
     }
 
     fn sanitize_html(text: &str) -> String {
@@ -208,8 +210,7 @@ impl NewsMonitorHook {
         Self::parse_openai_rss(&xml)
     }
 
-    /// Parses an OpenAI RSS feed body and returns `(link, title)` pairs,
-    /// filtering out OpenAI Academy help pages. Pure — no I/O.
+    /// Pure — no I/O.
     fn parse_openai_rss(xml: &str) -> Vec<(String, String)> {
         let item_re = regex::Regex::new(r"(?s)<item>(.*?)</item>").unwrap();
         let title_re = regex::Regex::new(r"<title>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</title>").unwrap();
@@ -259,15 +260,12 @@ impl NewsMonitorHook {
         results
     }
 
-    /// Parses Anthropic /news HTML and returns deduplicated absolute article URLs
-    /// in their order of first appearance. Pure — no I/O.
-    ///
-    /// Accepts both relative (`href="/news/foo"`) and absolute
+    /// Pure — no I/O. Accepts both relative (`href="/news/foo"`) and absolute
     /// (`href="https://www.anthropic.com/news/foo"`) hrefs, and allows
     /// uppercase/underscore in slugs (e.g. `australia-MOU`).
     fn parse_anthropic_slugs(html: &str) -> Vec<String> {
         let slug_re = regex::Regex::new(
-            r#"href="(?:https?://[^"]*?)?/news/([a-zA-Z0-9_-]+)""#
+            r#"href="(?:https?://(?:www\.)?anthropic\.com)?/news/([a-zA-Z0-9_-]+)""#
         ).unwrap();
         let mut seen = std::collections::HashSet::new();
         let mut urls = vec![];
@@ -377,7 +375,6 @@ impl NewsMonitorHook {
     }
 
 
-    /// Extracts a release identifier from Jina-rendered Dia release-notes markdown.
     /// Skips the page title (H1 containing "Release Notes" or "|") and returns
     /// the next H1. Returns an empty string if no release heading is found.
     fn parse_dia_release_id(markdown: &str) -> String {
@@ -501,9 +498,10 @@ impl HookHandler for NewsMonitorHook {
         let provider = Arc::clone(&self.provider);
         let model = self.model.clone();
         let identity = self.identity.clone();
+        let tg_token = self.tg_token.clone();
 
         tokio::spawn(async move {
-            let hook = NewsMonitorHook { config, db, http_client, provider, model, identity };
+            let hook = NewsMonitorHook { config, db, http_client, provider, model, identity, tg_token };
             loop {
                 tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
                 if let Err(e) = hook.background_tick().await {
@@ -520,16 +518,10 @@ pub fn register(
     provider: &std::sync::Arc<dyn crate::providers::Provider>,
     model: &str,
 ) {
-    let Some(value) = config.hooks.builtin.extra.get("news_monitor") else { return; };
-    let nm_config: NewsMonitorConfig = match value.clone().try_into() {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!("news_monitor: invalid config: {e}");
-            return;
-        }
-    };
-    if !nm_config.enabled { return; }
-    match NewsMonitorHook::new(nm_config, Arc::clone(provider), model.to_string()) {
+    crate::extra_hook_lookup!(config.hooks.builtin.extra, SECTION_NAME, NewsMonitorConfig, nm_config);
+    let identity = std::fs::read_to_string(config.workspace_dir.join("IDENTITY.md"))
+        .unwrap_or_default();
+    match NewsMonitorHook::new(nm_config, &config.workspace_dir, identity, Arc::clone(provider), model.to_string()) {
         Ok(hook) => {
             runner.register(Box::new(hook));
             tracing::info!("News monitor hook registered");
@@ -653,6 +645,17 @@ some content\n\
         assert!(
             urls.contains(&"https://www.anthropic.com/news/claude-sonnet-4-6".to_string()),
             "missing baseline slug claude-sonnet-4-6; urls = {urls:#?}"
+        );
+    }
+
+    #[test]
+    fn rejects_cross_domain_absolute_hrefs() {
+        // Cross-origin absolute URLs must NOT match, even if they contain /news/.
+        let html = r#"<a href="https://partner.example.com/news/foo">cross-domain</a>"#;
+        let urls = NewsMonitorHook::parse_anthropic_slugs(html);
+        assert!(
+            urls.is_empty(),
+            "cross-domain /news/ href must not be captured; got: {urls:#?}"
         );
     }
 

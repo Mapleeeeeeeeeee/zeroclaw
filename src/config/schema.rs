@@ -3506,7 +3506,7 @@ pub struct BuiltinHooksConfig {
     /// on demand by each custom hook's `register()` fn.
     #[serde(flatten, default)]
     #[schemars(skip)]
-    pub extra: std::collections::HashMap<String, toml::Value>,
+    pub(crate) extra: std::collections::HashMap<String, toml::Value>,
 }
 
 /// Configuration for the webhook-audit builtin hook.

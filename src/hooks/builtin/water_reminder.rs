@@ -11,6 +11,8 @@ use serde::{Deserialize, Serialize};
 use crate::hooks::traits::HookHandler;
 use crate::providers::Provider;
 
+pub(super) const SECTION_NAME: &str = "water_reminder";
+
 fn default_water_daily_goal() -> i32 { 2000 }
 fn default_water_per_sip() -> i32 { 30 }
 fn default_water_min_sips() -> u32 { 5 }
@@ -167,10 +169,11 @@ pub struct WaterReminderHook {
     pub provider: Arc<dyn Provider>,
     pub model: String,
     pub identity: String,
+    tg_token: String,
 }
 
 impl WaterReminderHook {
-    pub fn new(config: WaterReminderConfig, provider: Arc<dyn Provider>, model: String) -> Result<Self, WaterReminderError> {
+    pub fn new(config: WaterReminderConfig, workspace_dir: &std::path::Path, identity: String, provider: Arc<dyn Provider>, model: String) -> Result<Self, WaterReminderError> {
         if config.db_path != ":memory:" {
             if let Some(parent) = std::path::Path::new(&config.db_path).parent() {
                 if !parent.as_os_str().is_empty() {
@@ -190,9 +193,9 @@ impl WaterReminderHook {
                 id INTEGER PRIMARY KEY CHECK (id = 1),
                 current_streak INTEGER NOT NULL DEFAULT 0, last_goal_date TEXT);
             INSERT OR IGNORE INTO streak (id, current_streak) VALUES (1, 0);")?;
-        let identity = std::fs::read_to_string("/home/azureuser/.zeroclaw/workspace/IDENTITY.md")
-            .unwrap_or_default();
-        Ok(Self { db: Arc::new(Mutex::new(conn)), config, http_client: reqwest::Client::new(), provider, model, identity })
+        let tg_token = super::env_loader::load_env_value(workspace_dir, "TG_BOT_TOKEN")
+            .map_err(|e| WaterReminderError::Config(format!("{e}")))?;
+        Ok(Self { db: Arc::new(Mutex::new(conn)), config, http_client: reqwest::Client::new(), provider, model, identity, tg_token })
     }
 
     pub fn get_state(&self, date: &str) -> Result<ReminderState, WaterReminderError> {
@@ -647,10 +650,9 @@ impl WaterReminderHook {
         Ok(())
     }
 
-    /// Helper: get TG bot token from environment or config
-    fn tg_token(&self) -> String {
-        // Read from ZeroClaw config - the token is in [channels_config.telegram] or we use the known token
-        std::env::var("TG_BOT_TOKEN").unwrap_or_else(|_| "<REDACTED>".to_string())
+    /// Helper: get TG bot token from the workspace .env file (loaded at construction)
+    fn tg_token(&self) -> &str {
+        &self.tg_token
     }
 }
 
@@ -672,9 +674,10 @@ impl HookHandler for WaterReminderHook {
         let provider = Arc::clone(&self.provider);
         let model = self.model.clone();
         let identity = self.identity.clone();
+        let tg_token = self.tg_token.clone();
 
         tokio::spawn(async move {
-            let hook = WaterReminderHook { config, db, http_client, provider, model, identity };
+            let hook = WaterReminderHook { config, db, http_client, provider, model, identity, tg_token };
             loop {
                 tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
                 if let Err(e) = hook.background_tick().await {
@@ -867,16 +870,10 @@ pub fn register(
     provider: &std::sync::Arc<dyn crate::providers::Provider>,
     model: &str,
 ) {
-    let Some(value) = config.hooks.builtin.extra.get("water_reminder") else { return; };
-    let wr_config: WaterReminderConfig = match value.clone().try_into() {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!("water_reminder: invalid config: {e}");
-            return;
-        }
-    };
-    if !wr_config.enabled { return; }
-    match WaterReminderHook::new(wr_config, Arc::clone(provider), model.to_string()) {
+    crate::extra_hook_lookup!(config.hooks.builtin.extra, SECTION_NAME, WaterReminderConfig, wr_config);
+    let identity = std::fs::read_to_string(config.workspace_dir.join("IDENTITY.md"))
+        .unwrap_or_default();
+    match WaterReminderHook::new(wr_config, &config.workspace_dir, identity, Arc::clone(provider), model.to_string()) {
         Ok(hook) => {
             runner.register(Box::new(hook));
             tracing::info!("🚰 Water reminder hook registered");
@@ -902,6 +899,15 @@ mod tests {
     }
 
     fn hook() -> WaterReminderHook {
+        // Each invocation gets its own subdirectory so parallel tests don't race on .env.
+        let tmp = std::env::temp_dir().join(format!(
+            "zeroclaw_test_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id(),
+        ));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let env_path = tmp.join(".env");
+        let _ = std::fs::write(&env_path, "TG_BOT_TOKEN=test-token\n");
         WaterReminderHook::new(WaterReminderConfig {
             enabled: true, chat_id: "t".to_string(), daily_goal_ml: 2000, per_drink_ml: 30,
             min_sips: 5, max_sips: 8,
@@ -909,7 +915,7 @@ mod tests {
             lunch_start: "04:30".to_string(), lunch_end: "05:30".to_string(),
             interval_min_minutes: 30, interval_max_minutes: 50, snooze_wait_seconds: 180,
             db_path: ":memory:".to_string(),
-        }, Arc::new(TestProvider), "test-model".to_string()).unwrap()
+        }, &tmp, String::new(), Arc::new(TestProvider), "test-model".to_string()).unwrap()
     }
     fn st(dc: i32) -> ReminderState { ReminderState { date: "2025-03-17".to_string(), drink_count: dc, goal_ml: 2000, per_drink_ml: 30, current_streak: 0, last_goal_date: None } }
 

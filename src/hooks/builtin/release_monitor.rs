@@ -7,6 +7,8 @@ use serde::{Deserialize, Serialize};
 use crate::hooks::traits::HookHandler;
 use crate::providers::Provider;
 
+pub(super) const SECTION_NAME: &str = "release_monitor";
+
 fn default_release_check_interval() -> u32 { 60 }
 fn default_release_db_path() -> String { "/home/azureuser/.release-monitor/releases.db".to_string() }
 fn default_release_repos() -> Vec<String> {
@@ -60,10 +62,11 @@ pub struct ReleaseMonitorHook {
     provider: Arc<dyn Provider>,
     model: String,
     identity: String,
+    tg_token: String,
 }
 
 impl ReleaseMonitorHook {
-    pub fn new(config: ReleaseMonitorConfig, provider: Arc<dyn Provider>, model: String) -> Result<Self, anyhow::Error> {
+    pub fn new(config: ReleaseMonitorConfig, workspace_dir: &std::path::Path, identity: String, provider: Arc<dyn Provider>, model: String) -> Result<Self, anyhow::Error> {
         if config.db_path != ":memory:" {
             if let Some(parent) = std::path::Path::new(&config.db_path).parent() {
                 if !parent.as_os_str().is_empty() {
@@ -82,9 +85,8 @@ impl ReleaseMonitorHook {
                 value TEXT NOT NULL
             );"
         )?;
-        let identity = std::fs::read_to_string("/home/azureuser/.zeroclaw/workspace/IDENTITY.md")
-            .unwrap_or_default();
-        Ok(Self { config, db: Arc::new(Mutex::new(conn)), http_client: reqwest::Client::new(), provider, model, identity })
+        let tg_token = super::env_loader::load_env_value(workspace_dir, "TG_BOT_TOKEN")?;
+        Ok(Self { config, db: Arc::new(Mutex::new(conn)), http_client: reqwest::Client::new(), provider, model, identity, tg_token })
     }
 
     fn get_cached_tag(&self, repo: &str) -> Option<String> {
@@ -113,8 +115,8 @@ impl ReleaseMonitorHook {
         Ok(())
     }
 
-    fn tg_token(&self) -> String {
-        std::env::var("TG_BOT_TOKEN").unwrap_or_else(|_| "<REDACTED>".to_string())
+    fn tg_token(&self) -> &str {
+        &self.tg_token
     }
 
     /// Sanitize HTML: escape all & < >, then restore allowed tags
@@ -280,9 +282,10 @@ impl HookHandler for ReleaseMonitorHook {
         let provider = Arc::clone(&self.provider);
         let model = self.model.clone();
         let identity = self.identity.clone();
+        let tg_token = self.tg_token.clone();
 
         tokio::spawn(async move {
-            let hook = ReleaseMonitorHook { config, db, http_client, provider, model, identity };
+            let hook = ReleaseMonitorHook { config, db, http_client, provider, model, identity, tg_token };
             loop {
                 tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
                 if let Err(e) = hook.background_tick().await {
@@ -299,19 +302,13 @@ pub fn register(
     provider: &std::sync::Arc<dyn crate::providers::Provider>,
     model: &str,
 ) {
-    let Some(value) = config.hooks.builtin.extra.get("release_monitor") else { return; };
-    let rm_config: ReleaseMonitorConfig = match value.clone().try_into() {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!("release_monitor: invalid config: {e}");
-            return;
-        }
-    };
-    if !rm_config.enabled { return; }
-    match ReleaseMonitorHook::new(rm_config, Arc::clone(provider), model.to_string()) {
+    crate::extra_hook_lookup!(config.hooks.builtin.extra, SECTION_NAME, ReleaseMonitorConfig, rm_config);
+    let identity = std::fs::read_to_string(config.workspace_dir.join("IDENTITY.md"))
+        .unwrap_or_default();
+    match ReleaseMonitorHook::new(rm_config, &config.workspace_dir, identity, Arc::clone(provider), model.to_string()) {
         Ok(hook) => {
             runner.register(Box::new(hook));
-            tracing::info!("ð¦ Release monitor hook registered");
+            tracing::info!("📦 Release monitor hook registered");
         }
         Err(e) => tracing::warn!("Failed to initialize release monitor: {e}"),
     }

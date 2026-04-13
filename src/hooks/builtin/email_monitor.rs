@@ -7,6 +7,8 @@ use serde::{Deserialize, Serialize};
 use crate::hooks::traits::HookHandler;
 use crate::providers::Provider;
 
+pub(super) const SECTION_NAME: &str = "email_monitor";
+
 fn default_email_check_interval() -> u32 { 3 }
 fn default_email_db_path() -> String { "/home/azureuser/.email-monitor/emails.db".to_string() }
 fn default_email_blocked_senders() -> Vec<String> {
@@ -56,6 +58,7 @@ pub struct EmailMonitorHook {
 impl EmailMonitorHook {
     pub fn new(
         config: EmailMonitorConfig,
+        identity: String,
         provider: Arc<dyn Provider>,
         model: String,
     ) -> Result<Self, anyhow::Error> {
@@ -77,8 +80,6 @@ impl EmailMonitorHook {
                 value TEXT NOT NULL
             );"
         )?;
-        let identity = std::fs::read_to_string("/home/azureuser/.zeroclaw/workspace/IDENTITY.md")
-            .unwrap_or_default();
         Ok(Self {
             config,
             db: Arc::new(Mutex::new(conn)),
@@ -468,16 +469,10 @@ pub fn register(
     provider: &std::sync::Arc<dyn crate::providers::Provider>,
     model: &str,
 ) {
-    let Some(value) = config.hooks.builtin.extra.get("email_monitor") else { return; };
-    let em_config: EmailMonitorConfig = match value.clone().try_into() {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!("email_monitor: invalid config: {e}");
-            return;
-        }
-    };
-    if !em_config.enabled { return; }
-    match EmailMonitorHook::new(em_config, Arc::clone(provider), model.to_string()) {
+    crate::extra_hook_lookup!(config.hooks.builtin.extra, SECTION_NAME, EmailMonitorConfig, em_config);
+    let identity = std::fs::read_to_string(config.workspace_dir.join("IDENTITY.md"))
+        .unwrap_or_default();
+    match EmailMonitorHook::new(em_config, identity, Arc::clone(provider), model.to_string()) {
         Ok(hook) => {
             runner.register(Box::new(hook));
             tracing::info!("Email monitor hook registered");
