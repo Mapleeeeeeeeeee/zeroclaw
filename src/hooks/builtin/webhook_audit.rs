@@ -337,6 +337,19 @@ impl HookHandler for WebhookAuditHook {
     }
 }
 
+pub fn register(
+    runner: &mut crate::hooks::HookRunner,
+    config: &crate::config::schema::Config,
+    _provider: &std::sync::Arc<dyn crate::providers::Provider>,
+    _model: &str,
+) {
+    if config.hooks.builtin.webhook_audit.enabled {
+        runner.register(Box::new(WebhookAuditHook::new(
+            config.hooks.builtin.webhook_audit.clone(),
+        )));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

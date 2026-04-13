@@ -493,6 +493,30 @@ impl HookHandler for NewsMonitorHook {
     }
 }
 
+pub fn register(
+    runner: &mut crate::hooks::HookRunner,
+    config: &crate::config::schema::Config,
+    provider: &std::sync::Arc<dyn crate::providers::Provider>,
+    model: &str,
+) {
+    if config.hooks.builtin.news_monitor.enabled {
+        let nm_cfg = config.hooks.builtin.news_monitor.clone();
+        let nm_config = NewsMonitorConfig {
+            enabled: nm_cfg.enabled,
+            chat_id: nm_cfg.chat_id,
+            check_interval_minutes: nm_cfg.check_interval_minutes,
+            db_path: nm_cfg.db_path,
+        };
+        match NewsMonitorHook::new(nm_config, Arc::clone(provider), model.to_string()) {
+            Ok(hook) => {
+                runner.register(Box::new(hook));
+                tracing::info!("News monitor hook registered");
+            }
+            Err(e) => tracing::warn!("Failed to initialize news monitor: {e}"),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

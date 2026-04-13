@@ -431,3 +431,28 @@ impl HookHandler for EmailMonitorHook {
         });
     }
 }
+
+pub fn register(
+    runner: &mut crate::hooks::HookRunner,
+    config: &crate::config::schema::Config,
+    provider: &std::sync::Arc<dyn crate::providers::Provider>,
+    model: &str,
+) {
+    if config.hooks.builtin.email_monitor.enabled {
+        let em_cfg = config.hooks.builtin.email_monitor.clone();
+        let em_config = EmailMonitorConfig {
+            enabled: em_cfg.enabled,
+            chat_id: em_cfg.chat_id,
+            check_interval_minutes: em_cfg.check_interval_minutes,
+            db_path: em_cfg.db_path,
+            blocked_senders: em_cfg.blocked_senders,
+        };
+        match EmailMonitorHook::new(em_config, Arc::clone(provider), model.to_string()) {
+            Ok(hook) => {
+                runner.register(Box::new(hook));
+                tracing::info!("Email monitor hook registered");
+            }
+            Err(e) => tracing::warn!("Failed to initialize email monitor: {e}"),
+        }
+    }
+}

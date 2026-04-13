@@ -4150,104 +4150,12 @@ pub async fn start_channels(config: Config) -> Result<()> {
         multimodal: config.multimodal.clone(),
         hooks: if config.hooks.enabled {
             let mut runner = crate::hooks::HookRunner::new();
-            if config.hooks.builtin.command_logger {
-                runner.register(Box::new(crate::hooks::builtin::CommandLoggerHook::new()));
-            }
-            if config.hooks.builtin.webhook_audit.enabled {
-                runner.register(Box::new(crate::hooks::builtin::WebhookAuditHook::new(
-                    config.hooks.builtin.webhook_audit.clone(),
-                )));
-            }
-            // Water reminder hook
-            if config.hooks.builtin.water_reminder.enabled {
-                let wr_cfg = config.hooks.builtin.water_reminder.clone();
-                let wr_hook_config = crate::hooks::builtin::water_reminder::WaterReminderConfig {
-                    enabled: wr_cfg.enabled,
-                    chat_id: wr_cfg.chat_id,
-                    daily_goal_ml: wr_cfg.daily_goal_ml,
-                    per_drink_ml: wr_cfg.per_drink_ml,
-                    min_sips: wr_cfg.min_sips,
-                    max_sips: wr_cfg.max_sips,
-                    work_start: wr_cfg.work_start,
-                    work_end: wr_cfg.work_end,
-                    lunch_start: wr_cfg.lunch_start,
-                    lunch_end: wr_cfg.lunch_end,
-                    interval_min_minutes: wr_cfg.interval_min_minutes,
-                    interval_max_minutes: wr_cfg.interval_max_minutes,
-                    snooze_wait_seconds: wr_cfg.snooze_wait_seconds,
-                    db_path: wr_cfg.db_path,
-                };
-                match crate::hooks::builtin::water_reminder::WaterReminderHook::new(
-                    wr_hook_config,
-                    Arc::clone(&provider),
-                    model.clone(),
-                ) {
-                    Ok(hook) => {
-                        runner.register(Box::new(hook));
-                        tracing::info!("🚰 Water reminder hook registered");
-                    }
-                    Err(e) => tracing::warn!("Failed to initialize water reminder: {e}"),
-                }
-            }
-            // Release monitor hook
-            if config.hooks.builtin.release_monitor.enabled {
-                let rm_cfg = config.hooks.builtin.release_monitor.clone();
-                let rm_hook_config = crate::hooks::builtin::release_monitor::ReleaseMonitorConfig {
-                    enabled: rm_cfg.enabled,
-                    chat_id: rm_cfg.chat_id,
-                    check_interval_minutes: rm_cfg.check_interval_minutes,
-                    db_path: rm_cfg.db_path,
-                    repos: rm_cfg.repos,
-                };
-                match crate::hooks::builtin::release_monitor::ReleaseMonitorHook::new(
-                    rm_hook_config,
-                    Arc::clone(&provider),
-                    model.clone(),
-                ) {
-                    Ok(hook) => {
-                        runner.register(Box::new(hook));
-                        tracing::info!("ð¦ Release monitor hook registered");
-                    }
-                    Err(e) => tracing::warn!("Failed to initialize release monitor: {e}"),
-                }
-            }
-            if config.hooks.builtin.news_monitor.enabled {
-                let nm_cfg = config.hooks.builtin.news_monitor.clone();
-                let nm_config = crate::hooks::builtin::news_monitor::NewsMonitorConfig {
-                    enabled: nm_cfg.enabled,
-                    chat_id: nm_cfg.chat_id,
-                    check_interval_minutes: nm_cfg.check_interval_minutes,
-                    db_path: nm_cfg.db_path,
-                };
-                match crate::hooks::builtin::news_monitor::NewsMonitorHook::new(
-                    nm_config,
-                    Arc::clone(&provider),
-                    model.clone(),
-                ) {
-                    Ok(hook) => {
-                        runner.register(Box::new(hook));
-                        tracing::info!("News monitor hook registered");
-                    }
-                    Err(e) => tracing::warn!("Failed to initialize news monitor: {e}"),
-                }
-            }
-            if config.hooks.builtin.email_monitor.enabled {
-                let em_cfg = config.hooks.builtin.email_monitor.clone();
-                let em_config = crate::hooks::builtin::email_monitor::EmailMonitorConfig {
-                    enabled: em_cfg.enabled,
-                    chat_id: em_cfg.chat_id,
-                    check_interval_minutes: em_cfg.check_interval_minutes,
-                    db_path: em_cfg.db_path,
-                    blocked_senders: em_cfg.blocked_senders,
-                };
-                match crate::hooks::builtin::email_monitor::EmailMonitorHook::new(em_config, Arc::clone(&provider), model.clone()) {
-                    Ok(hook) => {
-                        runner.register(Box::new(hook));
-                        tracing::info!("Email monitor hook registered");
-                    }
-                    Err(e) => tracing::warn!("Failed to initialize email monitor: {e}"),
-                }
-            }
+            crate::hooks::builtin::registry::register_builtin_hooks(
+                &mut runner,
+                &config,
+                &provider,
+                &model,
+            );
             let hooks = Arc::new(runner);
             // Fire gateway_start on channels' hook runner so hooks like
             // water_reminder can spawn their background tasks.

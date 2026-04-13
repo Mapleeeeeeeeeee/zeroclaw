@@ -46,6 +46,17 @@ impl HookHandler for CommandLoggerHook {
     }
 }
 
+pub fn register(
+    runner: &mut crate::hooks::HookRunner,
+    config: &crate::config::schema::Config,
+    _provider: &std::sync::Arc<dyn crate::providers::Provider>,
+    _model: &str,
+) {
+    if config.hooks.builtin.command_logger {
+        runner.register(Box::new(CommandLoggerHook::new()));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

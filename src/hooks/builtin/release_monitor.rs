@@ -253,3 +253,28 @@ impl HookHandler for ReleaseMonitorHook {
         });
     }
 }
+
+pub fn register(
+    runner: &mut crate::hooks::HookRunner,
+    config: &crate::config::schema::Config,
+    provider: &std::sync::Arc<dyn crate::providers::Provider>,
+    model: &str,
+) {
+    if config.hooks.builtin.release_monitor.enabled {
+        let rm_cfg = config.hooks.builtin.release_monitor.clone();
+        let rm_hook_config = ReleaseMonitorConfig {
+            enabled: rm_cfg.enabled,
+            chat_id: rm_cfg.chat_id,
+            check_interval_minutes: rm_cfg.check_interval_minutes,
+            db_path: rm_cfg.db_path,
+            repos: rm_cfg.repos,
+        };
+        match ReleaseMonitorHook::new(rm_hook_config, Arc::clone(provider), model.to_string()) {
+            Ok(hook) => {
+                runner.register(Box::new(hook));
+                tracing::info!("ð¦ Release monitor hook registered");
+            }
+            Err(e) => tracing::warn!("Failed to initialize release monitor: {e}"),
+        }
+    }
+}

@@ -7,3 +7,4 @@ pub mod water_reminder;
 pub mod release_monitor;
 pub mod news_monitor;
 pub mod email_monitor;
+pub mod registry;

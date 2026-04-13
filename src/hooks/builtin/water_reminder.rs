@@ -793,6 +793,40 @@ pub fn parse_ai_response(raw: &str) -> String {
     if trimmed.is_empty() { "主子，該喝水了 💧".to_string() } else { trimmed.to_string() }
 }
 
+pub fn register(
+    runner: &mut crate::hooks::HookRunner,
+    config: &crate::config::schema::Config,
+    provider: &std::sync::Arc<dyn crate::providers::Provider>,
+    model: &str,
+) {
+    if config.hooks.builtin.water_reminder.enabled {
+        let wr_cfg = config.hooks.builtin.water_reminder.clone();
+        let wr_hook_config = WaterReminderConfig {
+            enabled: wr_cfg.enabled,
+            chat_id: wr_cfg.chat_id,
+            daily_goal_ml: wr_cfg.daily_goal_ml,
+            per_drink_ml: wr_cfg.per_drink_ml,
+            min_sips: wr_cfg.min_sips,
+            max_sips: wr_cfg.max_sips,
+            work_start: wr_cfg.work_start,
+            work_end: wr_cfg.work_end,
+            lunch_start: wr_cfg.lunch_start,
+            lunch_end: wr_cfg.lunch_end,
+            interval_min_minutes: wr_cfg.interval_min_minutes,
+            interval_max_minutes: wr_cfg.interval_max_minutes,
+            snooze_wait_seconds: wr_cfg.snooze_wait_seconds,
+            db_path: wr_cfg.db_path,
+        };
+        match WaterReminderHook::new(wr_hook_config, Arc::clone(provider), model.to_string()) {
+            Ok(hook) => {
+                runner.register(Box::new(hook));
+                tracing::info!("🚰 Water reminder hook registered");
+            }
+            Err(e) => tracing::warn!("Failed to initialize water reminder: {e}"),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
