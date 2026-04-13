@@ -1,0 +1,170 @@
+<?xml version="1.0" encoding="UTF-8"?><rss xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:content="http://purl.org/rss/1.0/modules/content/" xmlns:atom="http://www.w3.org/2005/Atom" version="2.0">
+    <channel>
+        <title><![CDATA[OpenAI News]]></title>
+        <description><![CDATA[The OpenAI blog]]></description>
+        <link>https://openai.com/news</link>
+        <generator>OpenAI</generator>
+        <lastBuildDate>Mon, 13 Apr 2026 06:10:12 GMT</lastBuildDate>
+        <atom:link href="https://openai.com/news/rss" rel="self" type="application/rss+xml"/>
+        <item>
+            <title><![CDATA[Using projects in ChatGPT]]></title>
+            <description><![CDATA[Learn how to use orojects in ChatGPT to organize chats, files, and instructions, manage ongoing work, and collaborate more effectively.]]></description>
+            <link>https://openai.com/academy/projects</link>
+            <guid isPermaLink="true">https://openai.com/academy/projects</guid>
+            <category><![CDATA[OpenAI Academy]]></category>
+            <pubDate>Fri, 10 Apr 2026 00:00:00 GMT</pubDate>
+        </item>
+<item>
+            <title><![CDATA[ChatGPT for marketing teams]]></title>
+            <description><![CDATA[Learn how marketing teams use ChatGPT to plan campaigns, generate content, analyze performance, and move from ideas to execution faster.]]></description>
+            <link>https://openai.com/academy/marketing</link>
+            <guid isPermaLink="true">https://openai.com/academy/marketing</guid>
+            <category><![CDATA[OpenAI Academy]]></category>
+            <pubDate>Fri, 10 Apr 2026 00:00:00 GMT</pubDate>
+        </item>
+<item>
+            <title><![CDATA[Our response to the Axios developer tool compromise]]></title>
+            <description><![CDATA[OpenAI responds to the Axios supply chain attack by rotating macOS code signing certificates, updating apps, and confirming no user data was compromised.]]></description>
+            <link>https://openai.com/index/axios-developer-tool-compromise</link>
+            <guid isPermaLink="true">https://openai.com/index/axios-developer-tool-compromise</guid>
+            <category><![CDATA[Security]]></category>
+            <pubDate>Fri, 10 Apr 2026 00:00:00 GMT</pubDate>
+        </item>
+<item>
+            <title><![CDATA[Using custom GPTs]]></title>
+            <description><![CDATA[Learn how to build and use custom GPTs to automate workflows, maintain consistent outputs, and create purpose-built AI assistants.]]></description>
+            <link>https://openai.com/academy/custom-gpts</link>
+            <guid isPermaLink="true">https://openai.com/academy/custom-gpts</guid>
+            <category><![CDATA[OpenAI Academy]]></category>
+            <pubDate>Fri, 10 Apr 2026 00:00:00 GMT</pubDate>
+        </item>
+<item>
+            <title><![CDATA[Analyzing data with ChatGPT]]></title>
+            <description><![CDATA[Learn how to analyze data with ChatGPT by exploring datasets, generating insights, creating visualizations, and turning findings into actionable decisions.]]></description>
+            <link>https://openai.com/academy/data-analysis</link>
+            <guid isPermaLink="true">https://openai.com/academy/data-analysis</guid>
+            <category><![CDATA[OpenAI Academy]]></category>
+            <pubDate>Fri, 10 Apr 2026 00:00:00 GMT</pubDate>
+        </item>
+<item>
+            <title><![CDATA[Using skills]]></title>
+            <description><![CDATA[Learn how to create and use ChatGPT skills to build reusable workflows, automate recurring tasks, and ensure consistent, high-quality outputs.]]></description>
+            <link>https://openai.com/academy/skills</link>
+            <guid isPermaLink="true">https://openai.com/academy/skills</guid>
+            <category><![CDATA[OpenAI Academy]]></category>
+            <pubDate>Fri, 10 Apr 2026 00:00:00 GMT</pubDate>
+        </item>
+<item>
+            <title><![CDATA[Writing with ChatGPT]]></title>
+            <description><![CDATA[Learn how to use ChatGPT for writing to draft, revise, and refine content with clear structure, tone, and intent.]]></description>
+            <link>https://openai.com/academy/writing</link>
+            <guid isPermaLink="true">https://openai.com/academy/writing</guid>
+            <category><![CDATA[OpenAI Academy]]></category>
+            <pubDate>Fri, 10 Apr 2026 00:00:00 GMT</pubDate>
+        </item>
+<item>
+            <title><![CDATA[ChatGPT for operations teams]]></title>
+            <description><![CDATA[Learn how operations teams use ChatGPT to streamline workflows, improve coordination, standardize processes, and drive faster execution.]]></description>
+            <link>https://openai.com/academy/operations</link>
+            <guid isPermaLink="true">https://openai.com/academy/operations</guid>
+            <category><![CDATA[OpenAI Academy]]></category>
+            <pubDate>Fri, 10 Apr 2026 00:00:00 GMT</pubDate>
+        </item>
+<item>
+            <title><![CDATA[ChatGPT for research]]></title>
+            <description><![CDATA[Learn how to use ChatGPT for research to gather sources, analyze information, and create structured, citation-backed insights.]]></description>
+            <link>https://openai.com/academy/research</link>
+            <guid isPermaLink="true">https://openai.com/academy/research</guid>
+            <category><![CDATA[OpenAI Academy]]></category>
+            <pubDate>Fri, 10 Apr 2026 00:00:00 GMT</pubDate>
+        </item>
+<item>
+            <title><![CDATA[Responsible and safe use of AI ]]></title>
+            <description><![CDATA[Learn how to use AI responsibly with best practices for safety, accuracy, and transparency when using tools like ChatGPT.]]></description>
+            <link>https://openai.com/academy/responsible-and-safe-use</link>
+            <guid isPermaLink="true">https://openai.com/academy/responsible-and-safe-use</guid>
+            <category><![CDATA[OpenAI Academy]]></category>
+            <pubDate>Fri, 10 Apr 2026 00:00:00 GMT</pubDate>
+        </item>
+<item>
+            <title><![CDATA[Prompting fundamentals]]></title>
+            <description><![CDATA[Learn prompting fundamentals and how to write clear, effective prompts to get better, more useful responses from ChatGPT.]]></description>
+            <link>https://openai.com/academy/prompting</link>
+            <guid isPermaLink="true">https://openai.com/academy/prompting</guid>
+            <category><![CDATA[OpenAI Academy]]></category>
+            <pubDate>Fri, 10 Apr 2026 00:00:00 GMT</pubDate>
+        </item>
+<item>
+            <title><![CDATA[Research with ChatGPT]]></title>
+            <description><![CDATA[Learn how to research with ChatGPT using search and deep research to find up-to-date information, analyze sources, and generate structured insights.]]></description>
+            <link>https://openai.com/academy/search-and-deep-research</link>
+            <guid isPermaLink="true">https://openai.com/academy/search-and-deep-research</guid>
+            <category><![CDATA[OpenAI Academy]]></category>
+            <pubDate>Fri, 10 Apr 2026 00:00:00 GMT</pubDate>
+        </item>
+<item>
+            <title><![CDATA[ChatGPT for customer success teams]]></title>
+            <description><![CDATA[Learn how customer success teams use ChatGPT to manage accounts, improve communication, reduce churn, and drive adoption and renewals.]]></description>
+            <link>https://openai.com/academy/customer-success</link>
+            <guid isPermaLink="true">https://openai.com/academy/customer-success</guid>
+            <category><![CDATA[OpenAI Academy]]></category>
+            <pubDate>Fri, 10 Apr 2026 00:00:00 GMT</pubDate>
+        </item>
+<item>
+            <title><![CDATA[Healthcare]]></title>
+            <description><![CDATA[Explore how clinicians use ChatGPT to support diagnosis, documentation, and patient care with secure, HIPAA-compliant AI tools.]]></description>
+            <link>https://openai.com/academy/healthcare</link>
+            <guid isPermaLink="true">https://openai.com/academy/healthcare</guid>
+            <category><![CDATA[OpenAI Academy]]></category>
+            <pubDate>Fri, 10 Apr 2026 00:00:00 GMT</pubDate>
+        </item>
+<item>
+            <title><![CDATA[ChatGPT for managers]]></title>
+            <description><![CDATA[Learn how managers use ChatGPT to prepare for conversations, write clear feedback, stay organized, and improve team effectiveness.]]></description>
+            <link>https://openai.com/academy/managers</link>
+            <guid isPermaLink="true">https://openai.com/academy/managers</guid>
+            <category><![CDATA[OpenAI Academy]]></category>
+            <pubDate>Fri, 10 Apr 2026 00:00:00 GMT</pubDate>
+        </item>
+<item>
+            <title><![CDATA[Getting started with ChatGPT]]></title>
+            <description><![CDATA[Learn how to use ChatGPT, start your first conversation, and discover simple ways to write, brainstorm, and solve problems with AI.]]></description>
+            <link>https://openai.com/academy/getting-started</link>
+            <guid isPermaLink="true">https://openai.com/academy/getting-started</guid>
+            <category><![CDATA[OpenAI Academy]]></category>
+            <pubDate>Fri, 10 Apr 2026 00:00:00 GMT</pubDate>
+        </item>
+<item>
+            <title><![CDATA[ChatGPT for finance teams]]></title>
+            <description><![CDATA[Learn how finance teams use ChatGPT to streamline reporting, analyze data, improve forecasts, and communicate insights more clearly.]]></description>
+            <link>https://openai.com/academy/finance</link>
+            <guid isPermaLink="true">https://openai.com/academy/finance</guid>
+            <category><![CDATA[OpenAI Academy]]></category>
+            <pubDate>Fri, 10 Apr 2026 00:00:00 GMT</pubDate>
+        </item>
+<item>
+            <title><![CDATA[AI fundamentals]]></title>
+            <description><![CDATA[Learn what AI is, how it works, and how tools like ChatGPT use large language models. A clear, beginner-friendly guide to understanding artificial intelligence.]]></description>
+            <link>https://openai.com/academy/what-is-ai</link>
+            <guid isPermaLink="true">https://openai.com/academy/what-is-ai</guid>
+            <category><![CDATA[OpenAI Academy]]></category>
+            <pubDate>Fri, 10 Apr 2026 00:00:00 GMT</pubDate>
+        </item>
+<item>
+            <title><![CDATA[Creating images with ChatGPT]]></title>
+            <description><![CDATA[Learn how to create and refine images with ChatGPT using clear prompts, iterate on designs, and generate high-quality visuals in minutes.]]></description>
+            <link>https://openai.com/academy/image-generation</link>
+            <guid isPermaLink="true">https://openai.com/academy/image-generation</guid>
+            <category><![CDATA[OpenAI Academy]]></category>
+            <pubDate>Fri, 10 Apr 2026 00:00:00 GMT</pubDate>
+        </item>
+<item>
+            <title><![CDATA[Financial services]]></title>
+            <description><![CDATA[Explore AI resources for financial services, including prompt packs, GPTs, guides, and tools to help institutions deploy and scale AI securely.]]></description>
+            <link>https://openai.com/academy/financial-services</link>
+            <guid isPermaLink="true">https://openai.com/academy/financial-services</guid>
+            <category><![CDATA[OpenAI Academy]]></category>
+            <pubDate>Fri, 10 Apr 2026 00:00:00 GMT</pubDate>
+        </item>
+    </channel>
+</rss>

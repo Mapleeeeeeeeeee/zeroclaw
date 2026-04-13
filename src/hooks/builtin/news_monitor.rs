@@ -184,13 +184,18 @@ impl NewsMonitorHook {
             Ok(t) => t,
             Err(_) => return vec![],
         };
+        Self::parse_openai_rss(&xml)
+    }
 
+    /// Parses an OpenAI RSS feed body and returns `(link, title)` pairs,
+    /// filtering out OpenAI Academy help pages. Pure — no I/O.
+    fn parse_openai_rss(xml: &str) -> Vec<(String, String)> {
         let item_re = regex::Regex::new(r"(?s)<item>(.*?)</item>").unwrap();
         let title_re = regex::Regex::new(r"<title>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</title>").unwrap();
         let link_re = regex::Regex::new(r"<link>\s*(https?://[^<]+?)\s*</link>").unwrap();
 
         let mut results = vec![];
-        for cap in item_re.captures_iter(&xml) {
+        for cap in item_re.captures_iter(xml) {
             let item = &cap[1];
             let title = title_re.captures(item)
                 .map(|c| c[1].trim().to_string())
@@ -198,9 +203,14 @@ impl NewsMonitorHook {
             let link = link_re.captures(item)
                 .map(|c| c[1].trim().to_string())
                 .unwrap_or_default();
-            if !link.is_empty() && !title.is_empty() {
-                results.push((link, title));
+            if link.is_empty() || title.is_empty() {
+                continue;
             }
+            // Skip OpenAI Academy help pages — they pollute the feed but aren't news.
+            if link.contains("/academy/") {
+                continue;
+            }
+            results.push((link, title));
         }
         results
     }
@@ -219,20 +229,35 @@ impl NewsMonitorHook {
             Err(_) => return vec![],
         };
 
-        let slug_re = regex::Regex::new(r#"href="(/news/[a-z0-9-]+)""#).unwrap();
-        let mut seen_slugs = std::collections::HashSet::new();
+        let urls = Self::parse_anthropic_slugs(&html);
         let mut results = vec![];
-
-        for cap in slug_re.captures_iter(&html) {
-            let slug = cap[1].to_string();
-            if !seen_slugs.insert(slug.clone()) {
-                continue;
-            }
-            let url = format!("https://www.anthropic.com{slug}");
+        for url in urls {
             let title = self.fetch_page_title(&url).await;
             results.push((url, title));
         }
         results
+    }
+
+    /// Parses Anthropic /news HTML and returns deduplicated absolute article URLs
+    /// in their order of first appearance. Pure — no I/O.
+    ///
+    /// Accepts both relative (`href="/news/foo"`) and absolute
+    /// (`href="https://www.anthropic.com/news/foo"`) hrefs, and allows
+    /// uppercase/underscore in slugs (e.g. `australia-MOU`).
+    fn parse_anthropic_slugs(html: &str) -> Vec<String> {
+        let slug_re = regex::Regex::new(
+            r#"href="(?:https?://[^"]*?)?/news/([a-zA-Z0-9_-]+)""#
+        ).unwrap();
+        let mut seen = std::collections::HashSet::new();
+        let mut urls = vec![];
+        for cap in slug_re.captures_iter(html) {
+            let slug = &cap[1];
+            let url = format!("https://www.anthropic.com/news/{slug}");
+            if seen.insert(url.clone()) {
+                urls.push(url);
+            }
+        }
+        urls
     }
 
     async fn fetch_page_title(&self, url: &str) -> String {
@@ -331,6 +356,17 @@ impl NewsMonitorHook {
     }
 
 
+    /// Extracts a release identifier from Jina-rendered Dia release-notes markdown.
+    /// Skips the page title (H1 containing "Release Notes" or "|") and returns
+    /// the next H1. Returns an empty string if no release heading is found.
+    fn parse_dia_release_id(markdown: &str) -> String {
+        markdown.lines()
+            .filter(|l| l.starts_with("# "))
+            .find(|l| !l.contains("Release Notes") && !l.contains('|'))
+            .map(|l| l.trim().to_string())
+            .unwrap_or_default()
+    }
+
     async fn check_dia_changelog(&self) -> Result<(), anyhow::Error> {
         // Use Jina Reader to bypass Cloudflare
         let jina_url = "https://r.jina.ai/https://www.diabrowser.com/release-notes/latest";
@@ -350,11 +386,7 @@ impl NewsMonitorHook {
             return Ok(());
         }
 
-        // Extract the first ## heading as release identifier
-        let release_id = text.lines()
-            .find(|l| l.starts_with("## "))
-            .map(|l| l.trim().to_string())
-            .unwrap_or_default();
+        let release_id = Self::parse_dia_release_id(&text);
         if release_id.is_empty() {
             tracing::warn!("dia_monitor: could not find release heading");
             return Ok(());
@@ -458,5 +490,137 @@ impl HookHandler for NewsMonitorHook {
                 }
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ANTHROPIC_FIXTURE: &str = include_str!("../../../tests/fixtures/anthropic_news.html");
+    const OPENAI_RSS_FIXTURE: &str = include_str!("../../../tests/fixtures/openai_news_rss.xml");
+    const DIA_NOTES_FIXTURE: &str = include_str!("../../../tests/fixtures/dia_release_notes.md");
+
+    #[test]
+    fn filters_out_openai_academy_help_pages() {
+        let results = NewsMonitorHook::parse_openai_rss(OPENAI_RSS_FIXTURE);
+        // Fixture has 20 items: 19 /academy/ pages + 1 /index/ real news.
+        assert_eq!(
+            results.len(), 1,
+            "expected 1 non-academy item from fixture, got {}: {results:#?}",
+            results.len()
+        );
+        let (link, title) = &results[0];
+        assert!(
+            link.contains("/index/"),
+            "surviving item should be an /index/ news page, got link={link}"
+        );
+        assert!(
+            !link.contains("/academy/"),
+            "academy pages must be filtered out; got {link}"
+        );
+        assert!(
+            !title.is_empty(),
+            "surviving item must have a non-empty title"
+        );
+    }
+
+    #[test]
+    fn openai_rss_parser_skips_items_with_empty_title_or_link() {
+        let xml = r#"
+            <rss><channel>
+                <item><title>Only title</title></item>
+                <item><link>https://openai.com/index/only-link</link></item>
+                <item>
+                    <title><![CDATA[Real Item]]></title>
+                    <link>https://openai.com/index/real</link>
+                </item>
+                <item>
+                    <title><![CDATA[Academy Noise]]></title>
+                    <link>https://openai.com/academy/noise</link>
+                </item>
+            </channel></rss>
+        "#;
+        let results = NewsMonitorHook::parse_openai_rss(xml);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, "https://openai.com/index/real");
+        assert_eq!(results[0].1, "Real Item");
+    }
+
+    #[test]
+    fn dia_release_parser_skips_page_title_and_returns_release_heading() {
+        let release_id = NewsMonitorHook::parse_dia_release_id(DIA_NOTES_FIXTURE);
+        // Real fixture's release title is "# Pick up where you left off" (Sync feature).
+        // Must NOT be the page title "# Dia Browser | Latest Release Notes".
+        assert_eq!(release_id, "# Pick up where you left off");
+        assert!(!release_id.contains("Release Notes"));
+        assert!(!release_id.contains('|'));
+    }
+
+    #[test]
+    fn dia_release_parser_handles_missing_heading() {
+        let empty_md = "just some text without any headings\nmore text\n";
+        let release_id = NewsMonitorHook::parse_dia_release_id(empty_md);
+        assert_eq!(release_id, "");
+    }
+
+    #[test]
+    fn dia_release_parser_uses_h1_not_h2() {
+        // Regression guard: old code used `## ` and would have returned "## Past Issues".
+        let md = "\
+# Some Release Title\n\
+some content\n\
+## Past Issues\n\
+- old release 1\n\
+- old release 2\n\
+";
+        let release_id = NewsMonitorHook::parse_dia_release_id(md);
+        assert_eq!(release_id, "# Some Release Title");
+        assert_ne!(release_id, "## Past Issues");
+    }
+
+    #[test]
+    fn parses_anthropic_slugs_from_real_fixture() {
+        let urls = NewsMonitorHook::parse_anthropic_slugs(ANTHROPIC_FIXTURE);
+
+        // Baseline: should find exactly the 14 unique articles currently on the news index.
+        assert_eq!(urls.len(), 14, "expected 14 unique articles, got {}: {urls:#?}", urls.len());
+
+        // Regression guard #1: slug with uppercase letters must be captured in full.
+        // Previously [a-z0-9-]+ truncated "australia-MOU" to "australia-" → 404.
+        assert!(
+            urls.contains(&"https://www.anthropic.com/news/australia-MOU".to_string()),
+            "missing australia-MOU (uppercase slug); urls = {urls:#?}"
+        );
+        assert!(
+            !urls.iter().any(|u| u.ends_with("/news/australia-")),
+            "should not contain truncated /news/australia- (old regex bug); urls = {urls:#?}"
+        );
+
+        // Regression guard #2: absolute-URL href must also be captured.
+        // Previously the regex required href to start with /news/ directly.
+        assert!(
+            urls.contains(&"https://www.anthropic.com/news/announcing-our-updated-responsible-scaling-policy".to_string()),
+            "missing announcing-our-updated-responsible-scaling-policy (absolute-href slug); urls = {urls:#?}"
+        );
+
+        // Sanity: known stable article should still parse.
+        assert!(
+            urls.contains(&"https://www.anthropic.com/news/claude-sonnet-4-6".to_string()),
+            "missing baseline slug claude-sonnet-4-6; urls = {urls:#?}"
+        );
+    }
+
+    #[test]
+    fn deduplicates_absolute_and_relative_hrefs_for_same_article() {
+        let html = r#"
+            <a href="/news/foo-bar">rel</a>
+            <a href="https://www.anthropic.com/news/foo-bar">abs</a>
+            <a href="https://www.anthropic.com/news/baz-QUX">other</a>
+        "#;
+        let urls = NewsMonitorHook::parse_anthropic_slugs(html);
+        assert_eq!(urls.len(), 2);
+        assert_eq!(urls[0], "https://www.anthropic.com/news/foo-bar");
+        assert_eq!(urls[1], "https://www.anthropic.com/news/baz-QUX");
     }
 }
