@@ -374,5 +374,8 @@ chat_id = "-1"
         let rm: ReleaseMonitorConfig = rm_value.clone().try_into().expect("decode config");
         assert!(rm.enabled);
         assert_eq!(rm.chat_id, "-1");
+        assert_eq!(rm.repos.len(), 4, "omitted repos should fall back to default_release_repos()");
+        assert!(rm.repos.contains(&"github/copilot-cli".to_string()));
+        assert_eq!(rm.check_interval_minutes, 60, "omitted interval should fall back to default_release_check_interval()");
     }
 }

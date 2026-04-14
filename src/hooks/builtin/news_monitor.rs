@@ -646,6 +646,22 @@ some content\n\
             urls.contains(&"https://www.anthropic.com/news/claude-sonnet-4-6".to_string()),
             "missing baseline slug claude-sonnet-4-6; urls = {urls:#?}"
         );
+
+        // Shape invariant: all URLs must be well-formed (no trailing quotes or spaces from over-matching regex).
+        assert!(
+            urls.iter().all(|u| u.starts_with("https://www.anthropic.com/news/") && !u.contains('"') && !u.contains(' ')),
+            "all URLs must be well-formed anthropic news URLs, got: {urls:?}"
+        );
+
+        // Shape invariant: each slug must contain only alphanumeric + dash/underscore.
+        assert!(
+            urls.iter().all(|u| {
+                u.strip_prefix("https://www.anthropic.com/news/")
+                    .map(|slug| slug.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'))
+                    .unwrap_or(false)
+            }),
+            "all slugs must be alphanumeric + dash/underscore only"
+        );
     }
 
     #[test]
