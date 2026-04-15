@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use async_trait::async_trait;
-use chrono::{Datelike, NaiveDate, NaiveTime};
+use chrono::NaiveTime;
 use parking_lot::Mutex;
 use rusqlite::Connection;
 use schemars::JsonSchema;
@@ -13,18 +13,45 @@ use crate::providers::Provider;
 
 pub(super) const SECTION_NAME: &str = "water_reminder";
 
-fn default_water_daily_goal() -> i32 { 2000 }
-fn default_water_per_sip() -> i32 { 30 }
-fn default_water_min_sips() -> u32 { 5 }
-fn default_water_max_sips() -> u32 { 8 }
-fn default_water_work_start() -> String { "01:30".to_string() }
-fn default_water_work_end() -> String { "10:30".to_string() }
-fn default_water_lunch_start() -> String { "04:30".to_string() }
-fn default_water_lunch_end() -> String { "05:30".to_string() }
-fn default_water_interval_min() -> u32 { 20 }
-fn default_water_interval_max() -> u32 { 35 }
-fn default_water_snooze() -> u64 { 180 }
-fn default_water_db_path() -> String { "/home/azureuser/.water-reminder/water.db".to_string() }
+fn default_water_daily_goal() -> i32 {
+    2000
+}
+fn default_water_per_sip() -> i32 {
+    30
+}
+fn default_water_min_sips() -> u32 {
+    5
+}
+fn default_water_max_sips() -> u32 {
+    8
+}
+fn default_water_work_start() -> String {
+    "01:30".to_string()
+}
+fn default_water_work_end() -> String {
+    "10:30".to_string()
+}
+fn default_water_lunch_start() -> String {
+    "04:30".to_string()
+}
+fn default_water_lunch_end() -> String {
+    "05:30".to_string()
+}
+fn default_water_interval_min() -> u32 {
+    20
+}
+fn default_water_interval_max() -> u32 {
+    35
+}
+fn default_water_snooze() -> u64 {
+    180
+}
+fn default_water_db_path() -> String {
+    "/home/azureuser/.water-reminder/water.db".to_string()
+}
+fn default_water_skip_non_workdays() -> bool {
+    true
+}
 
 /// Configuration for the water-reminder builtin hook.
 ///
@@ -74,6 +101,10 @@ pub struct WaterReminderConfig {
     /// Path to the SQLite database file. Default: `~/.water-reminder/water.db`.
     #[serde(default = "default_water_db_path")]
     pub db_path: String,
+    /// Skip all reminders and the daily report on non-workdays (weekends + TW public holidays).
+    /// Sources data from the bundled `taiwan_calendar` module. Default: `true`.
+    #[serde(default = "default_water_skip_non_workdays")]
+    pub skip_non_workdays: bool,
 }
 
 impl Default for WaterReminderConfig {
@@ -93,17 +124,28 @@ impl Default for WaterReminderConfig {
             interval_max_minutes: default_water_interval_max(),
             snooze_wait_seconds: default_water_snooze(),
             db_path: default_water_db_path(),
+            skip_non_workdays: default_water_skip_non_workdays(),
         }
     }
 }
 
 impl WaterReminderConfig {
-    pub fn parse_work_start(&self) -> Option<NaiveTime> { NaiveTime::parse_from_str(&self.work_start, "%H:%M").ok() }
-    pub fn parse_work_end(&self) -> Option<NaiveTime> { NaiveTime::parse_from_str(&self.work_end, "%H:%M").ok() }
-    pub fn parse_lunch_start(&self) -> Option<NaiveTime> { NaiveTime::parse_from_str(&self.lunch_start, "%H:%M").ok() }
-    pub fn parse_lunch_end(&self) -> Option<NaiveTime> { NaiveTime::parse_from_str(&self.lunch_end, "%H:%M").ok() }
+    pub fn parse_work_start(&self) -> Option<NaiveTime> {
+        NaiveTime::parse_from_str(&self.work_start, "%H:%M").ok()
+    }
+    pub fn parse_work_end(&self) -> Option<NaiveTime> {
+        NaiveTime::parse_from_str(&self.work_end, "%H:%M").ok()
+    }
+    pub fn parse_lunch_start(&self) -> Option<NaiveTime> {
+        NaiveTime::parse_from_str(&self.lunch_start, "%H:%M").ok()
+    }
+    pub fn parse_lunch_end(&self) -> Option<NaiveTime> {
+        NaiveTime::parse_from_str(&self.lunch_end, "%H:%M").ok()
+    }
     pub fn total_drinks_goal(&self) -> i32 {
-        if self.per_drink_ml <= 0 { return 0; }
+        if self.per_drink_ml <= 0 {
+            return 0;
+        }
         (self.daily_goal_ml + self.per_drink_ml - 1) / self.per_drink_ml
     }
 }
@@ -120,28 +162,46 @@ pub struct ReminderState {
 
 impl ReminderState {
     pub fn total_drinks_goal(&self) -> i32 {
-        if self.per_drink_ml <= 0 { return 0; }
+        if self.per_drink_ml <= 0 {
+            return 0;
+        }
         (self.goal_ml + self.per_drink_ml - 1) / self.per_drink_ml
     }
-    pub fn ml_consumed(&self) -> i32 { self.drink_count * self.per_drink_ml }
-    pub fn goal_reached(&self) -> bool { self.ml_consumed() >= self.goal_ml }
+    pub fn ml_consumed(&self) -> i32 {
+        self.drink_count * self.per_drink_ml
+    }
+    pub fn goal_reached(&self) -> bool {
+        self.ml_consumed() >= self.goal_ml
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum TimeContext { MorningStart, Midday, Afternoon, Closing, Outside, }
+pub enum TimeContext {
+    MorningStart,
+    Midday,
+    Afternoon,
+    Closing,
+    Outside,
+}
 
 impl TimeContext {
     pub fn from_time(t: &NaiveTime) -> Self {
-        let t9_30 = NaiveTime::from_hms_opt(1, 30, 0).unwrap();   // 09:30 CST
-        let t11_00 = NaiveTime::from_hms_opt(3, 0, 0).unwrap();  // 11:00 CST
-        let t14_00 = NaiveTime::from_hms_opt(6, 0, 0).unwrap();  // 14:00 CST
-        let t17_00 = NaiveTime::from_hms_opt(9, 0, 0).unwrap();  // 17:00 CST
-        let t18_30 = NaiveTime::from_hms_opt(10, 30, 0).unwrap();// 18:30 CST
-        if *t >= t9_30 && *t < t11_00 { TimeContext::MorningStart }
-        else if *t >= t11_00 && *t < t14_00 { TimeContext::Midday }
-        else if *t >= t14_00 && *t < t17_00 { TimeContext::Afternoon }
-        else if *t >= t17_00 && *t < t18_30 { TimeContext::Closing }
-        else { TimeContext::Outside }
+        let t9_30 = NaiveTime::from_hms_opt(1, 30, 0).unwrap(); // 09:30 CST
+        let t11_00 = NaiveTime::from_hms_opt(3, 0, 0).unwrap(); // 11:00 CST
+        let t14_00 = NaiveTime::from_hms_opt(6, 0, 0).unwrap(); // 14:00 CST
+        let t17_00 = NaiveTime::from_hms_opt(9, 0, 0).unwrap(); // 17:00 CST
+        let t18_30 = NaiveTime::from_hms_opt(10, 30, 0).unwrap(); // 18:30 CST
+        if *t >= t9_30 && *t < t11_00 {
+            TimeContext::MorningStart
+        } else if *t >= t11_00 && *t < t14_00 {
+            TimeContext::Midday
+        } else if *t >= t14_00 && *t < t17_00 {
+            TimeContext::Afternoon
+        } else if *t >= t17_00 && *t < t18_30 {
+            TimeContext::Closing
+        } else {
+            TimeContext::Outside
+        }
     }
     pub fn label(&self) -> &'static str {
         match self {
@@ -173,7 +233,13 @@ pub struct WaterReminderHook {
 }
 
 impl WaterReminderHook {
-    pub fn new(config: WaterReminderConfig, workspace_dir: &std::path::Path, identity: String, provider: Arc<dyn Provider>, model: String) -> Result<Self, WaterReminderError> {
+    pub fn new(
+        config: WaterReminderConfig,
+        workspace_dir: &std::path::Path,
+        identity: String,
+        provider: Arc<dyn Provider>,
+        model: String,
+    ) -> Result<Self, WaterReminderError> {
         if config.db_path != ":memory:" {
             if let Some(parent) = std::path::Path::new(&config.db_path).parent() {
                 if !parent.as_os_str().is_empty() {
@@ -184,7 +250,8 @@ impl WaterReminderHook {
             }
         }
         let conn = Connection::open(&config.db_path)?;
-        conn.execute_batch("CREATE TABLE IF NOT EXISTS daily_log (
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS daily_log (
                 date TEXT NOT NULL, drink_count INTEGER NOT NULL DEFAULT 0,
                 goal_ml INTEGER NOT NULL DEFAULT 2000, per_drink_ml INTEGER NOT NULL DEFAULT 30,
                 PRIMARY KEY (date));
@@ -192,10 +259,19 @@ impl WaterReminderHook {
             CREATE TABLE IF NOT EXISTS streak (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
                 current_streak INTEGER NOT NULL DEFAULT 0, last_goal_date TEXT);
-            INSERT OR IGNORE INTO streak (id, current_streak) VALUES (1, 0);")?;
+            INSERT OR IGNORE INTO streak (id, current_streak) VALUES (1, 0);",
+        )?;
         let tg_token = super::env_loader::load_env_value(workspace_dir, "TG_BOT_TOKEN")
             .map_err(|e| WaterReminderError::Config(format!("{e}")))?;
-        Ok(Self { db: Arc::new(Mutex::new(conn)), config, http_client: reqwest::Client::new(), provider, model, identity, tg_token })
+        Ok(Self {
+            db: Arc::new(Mutex::new(conn)),
+            config,
+            http_client: reqwest::Client::new(),
+            provider,
+            model,
+            identity,
+            tg_token,
+        })
     }
 
     pub fn get_state(&self, date: &str) -> Result<ReminderState, WaterReminderError> {
@@ -204,11 +280,22 @@ impl WaterReminderHook {
             rusqlite::params![date, self.config.daily_goal_ml, self.config.per_drink_ml])?;
         let (drink_count, goal_ml, per_drink_ml): (i32, i32, i32) = db.query_row(
             "SELECT drink_count, goal_ml, per_drink_ml FROM daily_log WHERE date = ?1",
-            rusqlite::params![date], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+            rusqlite::params![date],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
         let (current_streak, last_goal_date): (i32, Option<String>) = db.query_row(
             "SELECT current_streak, last_goal_date FROM streak WHERE id = 1",
-            [], |row| Ok((row.get(0)?, row.get(1)?)))?;
-        Ok(ReminderState { date: date.to_string(), drink_count, goal_ml, per_drink_ml, current_streak, last_goal_date })
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        Ok(ReminderState {
+            date: date.to_string(),
+            drink_count,
+            goal_ml,
+            per_drink_ml,
+            current_streak,
+            last_goal_date,
+        })
     }
 
     pub fn record_drink(&self, date: &str, sips: i32) -> Result<ReminderState, WaterReminderError> {
@@ -219,25 +306,43 @@ impl WaterReminderHook {
             rusqlite::params![date, self.config.daily_goal_ml, self.config.per_drink_ml, sips])?;
         let (drink_count, goal_ml, per_drink_ml): (i32, i32, i32) = db.query_row(
             "SELECT drink_count, goal_ml, per_drink_ml FROM daily_log WHERE date = ?1",
-            rusqlite::params![date], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+            rusqlite::params![date],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
         let (current_streak, last_goal_date): (i32, Option<String>) = db.query_row(
             "SELECT current_streak, last_goal_date FROM streak WHERE id = 1",
-            [], |row| Ok((row.get(0)?, row.get(1)?)))?;
-        Ok(ReminderState { date: date.to_string(), drink_count, goal_ml, per_drink_ml, current_streak, last_goal_date })
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        Ok(ReminderState {
+            date: date.to_string(),
+            drink_count,
+            goal_ml,
+            per_drink_ml,
+            current_streak,
+            last_goal_date,
+        })
     }
 
     pub fn schedule_next(&self, next_epoch: u64) -> Result<(), WaterReminderError> {
         let db = self.db.lock();
-        db.execute("INSERT INTO scheduler_state (key, value) VALUES ('next_reminder', ?1)
-             ON CONFLICT(key) DO UPDATE SET value = ?1", rusqlite::params![next_epoch.to_string()])?;
+        db.execute(
+            "INSERT INTO scheduler_state (key, value) VALUES ('next_reminder', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = ?1",
+            rusqlite::params![next_epoch.to_string()],
+        )?;
         Ok(())
     }
 
     pub fn finalize_day(&self, date: &str) -> Result<(), WaterReminderError> {
         let db = self.db.lock();
-        let result: Option<(i32, i32, i32)> = db.query_row(
-            "SELECT drink_count, goal_ml, per_drink_ml FROM daily_log WHERE date = ?1",
-            rusqlite::params![date], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).ok();
+        let result: Option<(i32, i32, i32)> = db
+            .query_row(
+                "SELECT drink_count, goal_ml, per_drink_ml FROM daily_log WHERE date = ?1",
+                rusqlite::params![date],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .ok();
         if let Some((drinks, goal_ml, per_drink_ml)) = result {
             if drinks * per_drink_ml >= goal_ml {
                 db.execute("UPDATE streak SET current_streak = current_streak + 1, last_goal_date = ?1 WHERE id = 1",
@@ -247,13 +352,19 @@ impl WaterReminderHook {
             }
         }
         // Clear pending state so it does not carry over to next day
-        db.execute("DELETE FROM scheduler_state WHERE key IN (pending_message_id, pending_sent_at, snooze_sent, original_message_id)", [])?;
+        db.execute("DELETE FROM scheduler_state WHERE key IN ('pending_message_id', 'pending_sent_at', 'snooze_sent', 'original_message_id')", [])?;
         Ok(())
     }
 
     pub fn get_scheduler_value(&self, key: &str) -> Result<Option<String>, WaterReminderError> {
         let db = self.db.lock();
-        Ok(db.query_row("SELECT value FROM scheduler_state WHERE key = ?1", rusqlite::params![key], |row| row.get(0)).ok())
+        Ok(db
+            .query_row(
+                "SELECT value FROM scheduler_state WHERE key = ?1",
+                rusqlite::params![key],
+                |row| row.get(0),
+            )
+            .ok())
     }
 
     pub fn set_scheduler_value(&self, key: &str, value: &str) -> Result<(), WaterReminderError> {
@@ -265,7 +376,10 @@ impl WaterReminderHook {
 
     pub fn clear_pending(&self, key: &str) -> Result<(), WaterReminderError> {
         let db = self.db.lock();
-        db.execute("DELETE FROM scheduler_state WHERE key = ?1", rusqlite::params![key])?;
+        db.execute(
+            "DELETE FROM scheduler_state WHERE key = ?1",
+            rusqlite::params![key],
+        )?;
         Ok(())
     }
 
@@ -273,7 +387,11 @@ impl WaterReminderHook {
 
     /// Call provider directly to generate AI text. Returns fallback on failure.
     pub async fn call_ai(&self, prompt: &str) -> String {
-        match self.provider.chat_with_system(Some(&self.identity), prompt, &self.model, 0.9).await {
+        match self
+            .provider
+            .chat_with_system(Some(&self.identity), prompt, &self.model, 0.9)
+            .await
+        {
             Ok(response) => parse_ai_response(&response),
             Err(e) => {
                 tracing::warn!("water_reminder call_ai error: {e}");
@@ -282,8 +400,7 @@ impl WaterReminderHook {
         }
     }
 
-    fn is_on_leave_today(&self) -> bool {
-        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    fn is_on_leave_today(&self, today: &str) -> bool {
         match self.get_scheduler_value(Self::LEAVE_DATE_KEY) {
             Ok(Some(date_str)) if !date_str.is_empty() => date_str == today,
             _ => false, // fail-open: DB error or no leave → not on leave
@@ -298,15 +415,43 @@ impl WaterReminderHook {
         }
     }
 
+    fn is_workday_today_tw(&self) -> bool {
+        let today = super::taiwan_calendar::today_in_taipei();
+        match super::taiwan_calendar::is_workday_tw(today) {
+            Some(v) => v,
+            None => {
+                tracing::warn!("🚰 TW calendar out of range for {today}, treating as workday");
+                true
+            }
+        }
+    }
+
+    fn should_skip_as_non_workday(&self) -> bool {
+        if self.config.skip_non_workdays && !self.is_workday_today_tw() {
+            tracing::info!("🚰 TW non-workday, skipping");
+            return true;
+        }
+        false
+    }
+
     async fn handle_leave_command(&self) -> String {
-        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        let today = chrono::Utc::now()
+            .with_timezone(&chrono_tz::Asia::Taipei)
+            .format("%Y-%m-%d")
+            .to_string();
         let state = self.get_state(&today).ok();
         let progress = match &state {
-            Some(s) => format!("目前進度：已喝{}口（{}ml / {}ml），連續天數{}天。", s.drink_count, s.ml_consumed(), s.goal_ml, s.current_streak),
+            Some(s) => format!(
+                "目前進度：已喝{}口（{}ml / {}ml），連續天數{}天。",
+                s.drink_count,
+                s.ml_consumed(),
+                s.goal_ml,
+                s.current_streak
+            ),
             None => "今日尚未開始喝水。".to_string(),
         };
 
-        if self.is_on_leave_today() {
+        if self.is_on_leave_today(&today) {
             let prompt = format!("你是小允子。主子剛說了「請假」但今天已經請過假了。{}用甄嬛傳風格回覆，提醒主子已請過假正在休息中，50字以內，帶emoji。只輸出回覆的話。", progress);
             return self.call_ai(&prompt).await;
         }
@@ -328,14 +473,23 @@ impl WaterReminderHook {
     }
 
     async fn handle_unleave_command(&self) -> String {
-        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        let today = chrono::Utc::now()
+            .with_timezone(&chrono_tz::Asia::Taipei)
+            .format("%Y-%m-%d")
+            .to_string();
         let state = self.get_state(&today).ok();
         let progress = match &state {
-            Some(s) => format!("目前進度：已喝{}口（{}ml / {}ml），連續天數{}天。", s.drink_count, s.ml_consumed(), s.goal_ml, s.current_streak),
+            Some(s) => format!(
+                "目前進度：已喝{}口（{}ml / {}ml），連續天數{}天。",
+                s.drink_count,
+                s.ml_consumed(),
+                s.goal_ml,
+                s.current_streak
+            ),
             None => "今日尚未開始喝水。".to_string(),
         };
 
-        if !self.is_on_leave_today() {
+        if !self.is_on_leave_today(&today) {
             let prompt = format!("你是小允子。主子說「銷假」但今天並未請假。{}用甄嬛傳風格回覆主子並未請假，50字以內，帶emoji。只輸出回覆的話。", progress);
             return self.call_ai(&prompt).await;
         }
@@ -357,8 +511,12 @@ impl WaterReminderHook {
             "chat_id": self.config.chat_id,
             "text": text,
         });
-        let _ = self.http_client
-            .post(format!("https://api.telegram.org/bot{}/sendMessage", self.tg_token()))
+        let _ = self
+            .http_client
+            .post(format!(
+                "https://api.telegram.org/bot{}/sendMessage",
+                self.tg_token()
+            ))
             .json(&body)
             .send()
             .await;
@@ -367,7 +525,7 @@ impl WaterReminderHook {
 
     /// Send a water reminder with inline keyboard
     pub async fn send_reminder(&self, is_snooze: bool) -> Result<(), WaterReminderError> {
-        let now = chrono::Local::now();
+        let now = chrono::Utc::now().with_timezone(&chrono_tz::Asia::Taipei);
         let date = now.format("%Y-%m-%d").to_string();
         let state = self.get_state(&date)?;
 
@@ -403,8 +561,12 @@ impl WaterReminderHook {
             "reply_markup": keyboard
         });
 
-        let resp = self.http_client
-            .post(format!("https://api.telegram.org/bot{}/sendMessage", self.tg_token()))
+        let resp = self
+            .http_client
+            .post(format!(
+                "https://api.telegram.org/bot{}/sendMessage",
+                self.tg_token()
+            ))
             .json(&body)
             .send()
             .await
@@ -427,13 +589,23 @@ impl WaterReminderHook {
     }
 
     /// Send confirmation after drink is recorded (edit the original message)
-    pub async fn send_confirmation(&self, chat_id: &str, message_id: i64, sips: i32) -> Result<(), WaterReminderError> {
-        let now = chrono::Local::now();
+    pub async fn send_confirmation(
+        &self,
+        chat_id: &str,
+        message_id: i64,
+        sips: i32,
+    ) -> Result<(), WaterReminderError> {
+        let now = chrono::Utc::now().with_timezone(&chrono_tz::Asia::Taipei);
         let date = now.format("%Y-%m-%d").to_string();
         let state = self.get_state(&date)?;
         let bar = build_progress_bar(state.drink_count, state.total_drinks_goal());
-        let text = format!("✅ 已記錄 {}口！{bar} {}/{}ml（共{}口）",
-            sips, state.ml_consumed(), state.goal_ml, state.drink_count);
+        let text = format!(
+            "✅ 已記錄 {}口！{bar} {}/{}ml（共{}口）",
+            sips,
+            state.ml_consumed(),
+            state.goal_ml,
+            state.drink_count
+        );
 
         let body = serde_json::json!({
             "chat_id": chat_id,
@@ -441,8 +613,12 @@ impl WaterReminderHook {
             "text": text,
         });
 
-        let _ = self.http_client
-            .post(format!("https://api.telegram.org/bot{}/editMessageText", self.tg_token()))
+        let _ = self
+            .http_client
+            .post(format!(
+                "https://api.telegram.org/bot{}/editMessageText",
+                self.tg_token()
+            ))
             .json(&body)
             .send()
             .await;
@@ -452,8 +628,12 @@ impl WaterReminderHook {
 
     /// Send daily report at 18:30
     pub async fn send_daily_report(&self) -> Result<(), WaterReminderError> {
-        let now = chrono::Local::now();
-        let date = now.format("%Y-%m-%d").to_string();
+        let now_taipei = chrono::Utc::now().with_timezone(&chrono_tz::Asia::Taipei);
+        let date = now_taipei.format("%Y-%m-%d").to_string();
+
+        if self.should_skip_as_non_workday() {
+            return Ok(());
+        }
 
         self.finalize_day(&date)?;
         let state = self.get_state(&date)?;
@@ -468,16 +648,25 @@ impl WaterReminderHook {
         } else {
             "💪 明天再加油".to_string()
         };
-        let text = format!("📊 今日喝水報告\n{bar} {}/{}ml\n{}\n\n{}",
-            state.ml_consumed(), state.goal_ml, streak_text, ai_text);
+        let text = format!(
+            "📊 今日喝水報告\n{bar} {}/{}ml\n{}\n\n{}",
+            state.ml_consumed(),
+            state.goal_ml,
+            streak_text,
+            ai_text
+        );
 
         let body = serde_json::json!({
             "chat_id": self.config.chat_id,
             "text": text,
         });
 
-        let _ = self.http_client
-            .post(format!("https://api.telegram.org/bot{}/sendMessage", self.tg_token()))
+        let _ = self
+            .http_client
+            .post(format!(
+                "https://api.telegram.org/bot{}/sendMessage",
+                self.tg_token()
+            ))
             .json(&body)
             .send()
             .await;
@@ -492,18 +681,17 @@ impl WaterReminderHook {
     /// 3. Daily report at 18:30
     /// 4. Lunch reminder (~13:00)
     pub async fn background_tick(&self) -> Result<(), WaterReminderError> {
-        let now = chrono::Local::now();
-        let now_time = now.time();
-        let now_date = now.date_naive();
-        let date_str = now.format("%Y-%m-%d").to_string();
+        let now_taipei = chrono::Utc::now().with_timezone(&chrono_tz::Asia::Taipei);
+        let now_time = now_taipei.time();
+        let date_str = now_taipei.format("%Y-%m-%d").to_string();
 
-        // Leave guard — skip all reminders if on leave today
-        if self.is_on_leave_today() {
+        // Cheapest guard first: O(1) HashMap lookup
+        if self.should_skip_as_non_workday() {
             return Ok(());
         }
 
-        // Skip weekends
-        if !is_weekday(&now_date) {
+        // DB I/O guard second
+        if self.is_on_leave_today(&date_str) {
             return Ok(());
         }
 
@@ -512,8 +700,12 @@ impl WaterReminderHook {
 
         // --- Daily report at 18:30 ---
         let report_time = chrono::NaiveTime::from_hms_opt(10, 30, 0).unwrap(); // 18:30 CST
-        if now_time >= report_time && now_time < chrono::NaiveTime::from_hms_opt(10, 35, 0).unwrap() { // 18:35 CST
-            let report_sent = self.get_scheduler_value("report_sent_today")?.unwrap_or_default();
+        if now_time >= report_time && now_time < chrono::NaiveTime::from_hms_opt(10, 35, 0).unwrap()
+        {
+            // 18:35 CST
+            let report_sent = self
+                .get_scheduler_value("report_sent_today")?
+                .unwrap_or_default();
             if report_sent != date_str {
                 self.send_daily_report().await?;
             }
@@ -560,25 +752,35 @@ impl WaterReminderHook {
         // --- Lunch window: send one reminder around 13:00 ---
         if is_lunch_window(&now_time, &self.config.lunch_start, &self.config.lunch_end) {
             let lunch_midpoint = chrono::NaiveTime::from_hms_opt(5, 0, 0).unwrap(); // 13:00 CST
-            let lunch_sent = self.get_scheduler_value("lunch_sent_today")?.unwrap_or_default();
+            let lunch_sent = self
+                .get_scheduler_value("lunch_sent_today")?
+                .unwrap_or_default();
             if now_time >= lunch_midpoint && lunch_sent != date_str {
                 self.send_reminder(false).await?;
                 self.set_scheduler_value("lunch_sent_today", &date_str)?;
                 // Schedule next after lunch
                 let next = chrono::Utc::now().timestamp() as u64
-                    + next_interval_seconds(self.config.interval_min_minutes, self.config.interval_max_minutes) as u64;
+                    + next_interval_seconds(
+                        self.config.interval_min_minutes,
+                        self.config.interval_max_minutes,
+                    ) as u64;
                 self.schedule_next(next)?;
             }
             return Ok(()); // During lunch, only the midpoint reminder
         }
 
         // --- First reminder of the day: fill water bottle ---
-        let fill_sent = self.get_scheduler_value("fill_bottle_today")?.unwrap_or_default();
+        let fill_sent = self
+            .get_scheduler_value("fill_bottle_today")?
+            .unwrap_or_default();
         if fill_sent != date_str {
             // New day started — clean up stale processed_msg_* entries to prevent DB bloat
             {
                 let db = self.db.lock();
-                if let Err(e) = db.execute("DELETE FROM scheduler_state WHERE key LIKE 'processed_msg_%'", []) {
+                if let Err(e) = db.execute(
+                    "DELETE FROM scheduler_state WHERE key LIKE 'processed_msg_%'",
+                    [],
+                ) {
                     tracing::warn!("water_reminder: failed to clean processed_msg entries: {e}");
                 }
             }
@@ -631,7 +833,11 @@ impl WaterReminderHook {
     /// Send a "fill water bottle" reminder at start of work day (no inline keyboard)
     pub async fn send_fill_bottle_reminder(&self) -> Result<(), WaterReminderError> {
         let prompt = "你是小允子。現在是上班時間開始，主子剛到辦公室。用甄嬛傳風格提醒主子先去裝水，50字以內，帶一個emoji。只輸出提醒的話。";
-        let ai_text = match self.provider.chat_with_system(Some(&self.identity), prompt, &self.model, 0.9).await {
+        let ai_text = match self
+            .provider
+            .chat_with_system(Some(&self.identity), prompt, &self.model, 0.9)
+            .await
+        {
             Ok(response) => parse_ai_response(&response),
             Err(_) => "主子，先去裝杯水吧～奴才等您回來 🚰".to_string(),
         };
@@ -641,8 +847,12 @@ impl WaterReminderHook {
             "text": ai_text,
         });
 
-        let _ = self.http_client
-            .post(format!("https://api.telegram.org/bot{}/sendMessage", self.tg_token()))
+        let _ = self
+            .http_client
+            .post(format!(
+                "https://api.telegram.org/bot{}/sendMessage",
+                self.tg_token()
+            ))
             .json(&body)
             .send()
             .await;
@@ -658,14 +868,20 @@ impl WaterReminderHook {
 
 #[async_trait]
 impl HookHandler for WaterReminderHook {
-    fn name(&self) -> &str { "water_reminder" }
+    fn name(&self) -> &str {
+        "water_reminder"
+    }
 
     async fn on_gateway_start(&self, _host: &str, _port: u16) {
         if !self.config.enabled {
             return;
         }
-        tracing::info!("🚰 WaterReminderHook registered (goal: {}ml, interval: {}-{}min)",
-            self.config.daily_goal_ml, self.config.interval_min_minutes, self.config.interval_max_minutes);
+        tracing::info!(
+            "🚰 WaterReminderHook registered (goal: {}ml, interval: {}-{}min)",
+            self.config.daily_goal_ml,
+            self.config.interval_min_minutes,
+            self.config.interval_max_minutes
+        );
 
         // Spawn background tick task (60s interval)
         let config = self.config.clone();
@@ -677,7 +893,15 @@ impl HookHandler for WaterReminderHook {
         let tg_token = self.tg_token.clone();
 
         tokio::spawn(async move {
-            let hook = WaterReminderHook { config, db, http_client, provider, model, identity, tg_token };
+            let hook = WaterReminderHook {
+                config,
+                db,
+                http_client,
+                provider,
+                model,
+                identity,
+                tg_token,
+            };
             loop {
                 tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
                 if let Err(e) = hook.background_tick().await {
@@ -694,7 +918,9 @@ impl HookHandler for WaterReminderHook {
 
         if callback_data.starts_with("water:confirm") {
             // Parse sips: "water:confirm:6" → 6
-            let sips: i32 = callback_data.split(':').nth(2)
+            let sips: i32 = callback_data
+                .split(':')
+                .nth(2)
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(5); // default 5 sips if parse fails
 
@@ -704,18 +930,26 @@ impl HookHandler for WaterReminderHook {
             let processed_key = format!("processed_msg_{}", message_id);
             let already_processed = self.get_scheduler_value(&processed_key).unwrap_or(None);
             if already_processed.is_some() {
-                tracing::warn!("water_reminder: message_id={} already processed, ignoring duplicate press", message_id);
+                tracing::warn!(
+                    "water_reminder: message_id={} already processed, ignoring duplicate press",
+                    message_id
+                );
                 return;
             }
 
             // Record sips (user pressed the button)
-            let now = chrono::Local::now();
+            let now = chrono::Utc::now().with_timezone(&chrono_tz::Asia::Taipei);
             let date = now.format("%Y-%m-%d").to_string();
 
             match self.record_drink(&date, sips) {
                 Ok(state) => {
-                    tracing::info!("🚰 Sips recorded: {} sips, total {}/{} ({}ml)",
-                        sips, state.drink_count, state.total_drinks_goal(), state.ml_consumed());
+                    tracing::info!(
+                        "🚰 Sips recorded: {} sips, total {}/{} ({}ml)",
+                        sips,
+                        state.drink_count,
+                        state.total_drinks_goal(),
+                        state.ml_consumed()
+                    );
                 }
                 Err(e) => {
                     tracing::warn!("water_reminder record_drink error: {e}");
@@ -728,11 +962,11 @@ impl HookHandler for WaterReminderHook {
             // Clear pending state if this message_id matches the current pending one (normal flow).
             // If the user pressed an old/snooze message button, pending_message_id may differ —
             // we still mark the old button processed but leave the new pending intact.
-            let pending_id = self.get_scheduler_value("pending_message_id").unwrap_or(None);
-            let pending_matches = pending_id
-                .as_deref()
-                .and_then(|s| s.parse::<i64>().ok())
-                == Some(message_id);
+            let pending_id = self
+                .get_scheduler_value("pending_message_id")
+                .unwrap_or(None);
+            let pending_matches =
+                pending_id.as_deref().and_then(|s| s.parse::<i64>().ok()) == Some(message_id);
             if pending_matches {
                 let _ = self.clear_pending("pending_message_id");
                 let _ = self.clear_pending("pending_sent_at");
@@ -769,7 +1003,10 @@ impl HookHandler for WaterReminderHook {
         }
     }
 
-    async fn on_message_received(&self, message: crate::channels::traits::ChannelMessage) -> crate::hooks::traits::HookResult<crate::channels::traits::ChannelMessage> {
+    async fn on_message_received(
+        &self,
+        message: crate::channels::traits::ChannelMessage,
+    ) -> crate::hooks::traits::HookResult<crate::channels::traits::ChannelMessage> {
         if !self.config.enabled {
             return crate::hooks::traits::HookResult::Continue(message);
         }
@@ -781,7 +1018,9 @@ impl HookHandler for WaterReminderHook {
             if let Err(e) = self.send_telegram_text(&reply).await {
                 tracing::error!("🚰 Failed to send leave reply: {e}");
             }
-            return crate::hooks::traits::HookResult::Cancel("water_reminder: leave command handled".to_string());
+            return crate::hooks::traits::HookResult::Cancel(
+                "water_reminder: leave command handled".to_string(),
+            );
         }
 
         if text == "銷假" || text == "/unleave" {
@@ -789,7 +1028,9 @@ impl HookHandler for WaterReminderHook {
             if let Err(e) = self.send_telegram_text(&reply).await {
                 tracing::error!("🚰 Failed to send unleave reply: {e}");
             }
-            return crate::hooks::traits::HookResult::Cancel("water_reminder: unleave command handled".to_string());
+            return crate::hooks::traits::HookResult::Cancel(
+                "water_reminder: unleave command handled".to_string(),
+            );
         }
 
         crate::hooks::traits::HookResult::Continue(message)
@@ -799,25 +1040,30 @@ impl HookHandler for WaterReminderHook {
 // Pure business logic functions
 
 pub fn is_work_time(now: &NaiveTime, work_start: &str, work_end: &str) -> bool {
-    let Ok(start) = NaiveTime::parse_from_str(work_start, "%H:%M") else { return false; };
-    let Ok(end) = NaiveTime::parse_from_str(work_end, "%H:%M") else { return false; };
+    let Ok(start) = NaiveTime::parse_from_str(work_start, "%H:%M") else {
+        return false;
+    };
+    let Ok(end) = NaiveTime::parse_from_str(work_end, "%H:%M") else {
+        return false;
+    };
     *now >= start && *now < end
 }
 
 pub fn is_lunch_window(now: &NaiveTime, lunch_start: &str, lunch_end: &str) -> bool {
-    let Ok(start) = NaiveTime::parse_from_str(lunch_start, "%H:%M") else { return false; };
-    let Ok(end) = NaiveTime::parse_from_str(lunch_end, "%H:%M") else { return false; };
+    let Ok(start) = NaiveTime::parse_from_str(lunch_start, "%H:%M") else {
+        return false;
+    };
+    let Ok(end) = NaiveTime::parse_from_str(lunch_end, "%H:%M") else {
+        return false;
+    };
     *now >= start && *now < end
-}
-
-pub fn is_weekday(date: &NaiveDate) -> bool {
-    use chrono::Weekday;
-    !matches!(date.weekday(), Weekday::Sat | Weekday::Sun)
 }
 
 pub fn next_interval_seconds(min_minutes: u32, max_minutes: u32) -> u32 {
     use rand::RngExt;
-    if min_minutes >= max_minutes { return min_minutes * 60; }
+    if min_minutes >= max_minutes {
+        return min_minutes * 60;
+    }
     let mut rng = rand::rng();
     rng.random_range(min_minutes..=max_minutes) * 60
 }
@@ -825,7 +1071,9 @@ pub fn next_interval_seconds(min_minutes: u32, max_minutes: u32) -> u32 {
 pub fn build_progress_bar(drinks: i32, total_drinks: i32) -> String {
     const FULL: char = '\u{2588}';
     const EMPTY: char = '\u{2591}';
-    if total_drinks <= 0 { return std::iter::repeat(EMPTY).take(10).collect(); }
+    if total_drinks <= 0 {
+        return std::iter::repeat(EMPTY).take(10).collect();
+    }
     let filled = ((drinks as f64 / total_drinks as f64) * 10.0).round() as usize;
     let filled = filled.min(10);
     let f: String = std::iter::repeat(FULL).take(filled).collect();
@@ -837,7 +1085,11 @@ pub fn build_ai_prompt(state: &ReminderState, is_snooze: bool, sips: u32) -> Str
     let total = state.total_drinks_goal();
     let bar = build_progress_bar(state.drink_count, total);
     let ctx = TimeContext::from_time(&chrono::Local::now().time());
-    let snooze_note = if is_snooze { "（這是一次提醒後 snooze 的再次提醒）" } else { "" };
+    let snooze_note = if is_snooze {
+        "（這是一次提醒後 snooze 的再次提醒）"
+    } else {
+        ""
+    };
     let sip_ml = sips * 30;
     format!("你是小允子，一個體貼又有點俳皮的喝水提醒助理，專門服務你的主子。\n現在是{time_label}時段。{snooze_note}\n主子今天的喝水狀況：\n- 已喝：{drinks} 口（{ml_consumed} ml），目標 {goal_ml} ml\n- 進度：{bar}（{drinks}/{total} 口）\n- 連續達標天數：{streak} 天\n\n請提醒主子喝 {sips} 口水（約 {sip_ml}ml）。直接在提醒中說「喝{sips}口」。\n用溫柔撒婬但不誧張的方式提醒，50字以內，不要換行，可以用一個表情符號結尾。\n如果 snooze 的話可以加一點「主子你又忘啦」的俳皮感。\n只輸出提醒的話，不要解釋。",
         time_label = ctx.label(), snooze_note = snooze_note,
@@ -852,7 +1104,11 @@ pub fn build_ai_report_prompt(state: &ReminderState, goal_reached: bool) -> Stri
     let result_note = if goal_reached {
         format!("主子今天達標了！連續達標 {} 天🎉", state.current_streak)
     } else {
-        format!("主子今天喝了 {} 口，還差 {} 口才達標。", state.drink_count, (total - state.drink_count).max(0))
+        format!(
+            "主子今天喝了 {} 口，還差 {} 口才達標。",
+            state.drink_count,
+            (total - state.drink_count).max(0)
+        )
     };
     format!("你是小允子，喝水提醒助理。今天的喝水報告如下：\n- 日期：{date}\n- 喝水次數：{drinks} 口（{ml} ml），目標 {goal_ml} ml\n- 進度：{bar}\n- {result_note}\n- 連續達標：{streak} 天\n\n請用輕鬆溫暖的語氣寫一個每日喝水總結報告，100字以內。如果達標請給予鼓勵；如果沒達標請溫柔地說明。只輸出報告內容，不要解釋。",
         date = state.date, drinks = state.drink_count, ml = state.ml_consumed(),
@@ -861,7 +1117,11 @@ pub fn build_ai_report_prompt(state: &ReminderState, goal_reached: bool) -> Stri
 
 pub fn parse_ai_response(raw: &str) -> String {
     let trimmed = raw.trim();
-    if trimmed.is_empty() { "主子，該喝水了 💧".to_string() } else { trimmed.to_string() }
+    if trimmed.is_empty() {
+        "主子，該喝水了 💧".to_string()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 pub fn register(
@@ -870,10 +1130,21 @@ pub fn register(
     provider: &std::sync::Arc<dyn crate::providers::Provider>,
     model: &str,
 ) {
-    crate::extra_hook_lookup!(config.hooks.builtin.extra, SECTION_NAME, WaterReminderConfig, wr_config);
-    let identity = std::fs::read_to_string(config.workspace_dir.join("IDENTITY.md"))
-        .unwrap_or_default();
-    match WaterReminderHook::new(wr_config, &config.workspace_dir, identity, Arc::clone(provider), model.to_string()) {
+    crate::extra_hook_lookup!(
+        config.hooks.builtin.extra,
+        SECTION_NAME,
+        WaterReminderConfig,
+        wr_config
+    );
+    let identity =
+        std::fs::read_to_string(config.workspace_dir.join("IDENTITY.md")).unwrap_or_default();
+    match WaterReminderHook::new(
+        wr_config,
+        &config.workspace_dir,
+        identity,
+        Arc::clone(provider),
+        model.to_string(),
+    ) {
         Ok(hook) => {
             runner.register(Box::new(hook));
             tracing::info!("🚰 Water reminder hook registered");
@@ -885,15 +1156,25 @@ pub fn register(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
     use chrono::NaiveDate;
+    use std::sync::Arc;
 
-    fn t(h: u32, m: u32) -> NaiveTime { NaiveTime::from_hms_opt(h, m, 0).unwrap() }
-    fn d(y: i32, mo: u32, day: u32) -> NaiveDate { NaiveDate::from_ymd_opt(y, mo, day).unwrap() }
+    fn t(h: u32, m: u32) -> NaiveTime {
+        NaiveTime::from_hms_opt(h, m, 0).unwrap()
+    }
+    fn d(y: i32, mo: u32, day: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(y, mo, day).unwrap()
+    }
     struct TestProvider;
     #[async_trait::async_trait]
     impl crate::providers::Provider for TestProvider {
-        async fn chat_with_system(&self, _sys: Option<&str>, _msg: &str, _model: &str, _temp: f64) -> anyhow::Result<String> {
+        async fn chat_with_system(
+            &self,
+            _sys: Option<&str>,
+            _msg: &str,
+            _model: &str,
+            _temp: f64,
+        ) -> anyhow::Result<String> {
             Ok("test response".to_string())
         }
     }
@@ -908,86 +1189,311 @@ mod tests {
         std::fs::create_dir_all(&tmp).unwrap();
         let env_path = tmp.join(".env");
         let _ = std::fs::write(&env_path, "TG_BOT_TOKEN=test-token\n");
-        WaterReminderHook::new(WaterReminderConfig {
-            enabled: true, chat_id: "t".to_string(), daily_goal_ml: 2000, per_drink_ml: 30,
-            min_sips: 5, max_sips: 8,
-            work_start: "01:30".to_string(), work_end: "10:30".to_string(),
-            lunch_start: "04:30".to_string(), lunch_end: "05:30".to_string(),
-            interval_min_minutes: 30, interval_max_minutes: 50, snooze_wait_seconds: 180,
-            db_path: ":memory:".to_string(),
-        }, &tmp, String::new(), Arc::new(TestProvider), "test-model".to_string()).unwrap()
+        WaterReminderHook::new(
+            WaterReminderConfig {
+                enabled: true,
+                chat_id: "t".to_string(),
+                daily_goal_ml: 2000,
+                per_drink_ml: 30,
+                min_sips: 5,
+                max_sips: 8,
+                work_start: "01:30".to_string(),
+                work_end: "10:30".to_string(),
+                lunch_start: "04:30".to_string(),
+                lunch_end: "05:30".to_string(),
+                interval_min_minutes: 30,
+                interval_max_minutes: 50,
+                snooze_wait_seconds: 180,
+                db_path: ":memory:".to_string(),
+                skip_non_workdays: true,
+            },
+            &tmp,
+            String::new(),
+            Arc::new(TestProvider),
+            "test-model".to_string(),
+        )
+        .unwrap()
     }
-    fn st(dc: i32) -> ReminderState { ReminderState { date: "2025-03-17".to_string(), drink_count: dc, goal_ml: 2000, per_drink_ml: 30, current_streak: 0, last_goal_date: None } }
+    fn st(dc: i32) -> ReminderState {
+        ReminderState {
+            date: "2025-03-17".to_string(),
+            drink_count: dc,
+            goal_ml: 2000,
+            per_drink_ml: 30,
+            current_streak: 0,
+            last_goal_date: None,
+        }
+    }
 
-    #[test] fn work_time_inside() { assert!(is_work_time(&t(2,0),"01:30","10:30")); }
-    #[test] fn work_time_start_incl() { assert!(is_work_time(&t(1,30),"01:30","10:30")); }
-    #[test] fn work_time_end_excl() { assert!(!is_work_time(&t(10,30),"01:30","10:30")); }
-    #[test] fn work_time_before() { assert!(!is_work_time(&t(0,0),"01:30","10:30")); }
-    #[test] fn work_time_after() { assert!(!is_work_time(&t(12,0),"01:30","10:30")); }
-    #[test] fn work_time_bad_fmt() { assert!(!is_work_time(&t(2,0),"1:30am","10:30")); }
-    #[test] fn lunch_inside() { assert!(is_lunch_window(&t(5,0),"04:30","05:30")); }
-    #[test] fn lunch_start_incl() { assert!(is_lunch_window(&t(4,30),"04:30","05:30")); }
-    #[test] fn lunch_end_excl() { assert!(!is_lunch_window(&t(5,30),"04:30","05:30")); }
-    #[test] fn lunch_outside() { assert!(!is_lunch_window(&t(3,0),"04:30","05:30")); }
-    #[test] fn monday_weekday() { assert!(is_weekday(&d(2025,3,17))); }
-    #[test] fn friday_weekday() { assert!(is_weekday(&d(2025,3,21))); }
-    #[test] fn saturday_not() { assert!(!is_weekday(&d(2025,3,22))); }
-    #[test] fn sunday_not() { assert!(!is_weekday(&d(2025,3,23))); }
-    #[test] fn interval_range() { for _ in 0..50 { let s = next_interval_seconds(30,50); assert!(s>=1800&&s<=3000); } }
-    #[test] fn interval_equal() { assert_eq!(next_interval_seconds(45,45),2700); }
-    #[test] fn interval_reversed() { assert_eq!(next_interval_seconds(60,30),3600); }
-    #[test] fn bar_empty() { let b=build_progress_bar(0,10); assert_eq!(b.chars().count(),10); assert!(b.chars().all(|c|c=='\u{2591}')); }
-    #[test] fn bar_full() { let b=build_progress_bar(10,10); assert!(b.chars().all(|c|c=='\u{2588}')); }
-    #[test] fn bar_half() { let b=build_progress_bar(5,10); assert_eq!(b.chars().filter(|c|*c=='\u{2588}').count(),5); }
-    #[test] fn bar_overflow() { let b=build_progress_bar(20,10); assert!(b.chars().all(|c|c=='\u{2588}')); }
-    #[test] fn bar_zero_total() { let b=build_progress_bar(5,0); assert!(b.chars().all(|c|c=='\u{2591}')); }
-    #[test] fn bar_always_10() { for i in 0..=15 { assert_eq!(build_progress_bar(i,13).chars().count(),10); } }
-    #[test] fn ai_resp_trim() { assert_eq!(parse_ai_response("  hi  "),"hi"); }
-    #[test] fn ai_resp_empty() { assert!(!parse_ai_response("").is_empty()); }
-    #[test] fn ai_resp_ws() { assert!(!parse_ai_response("   ").is_empty()); }
-    #[test] fn ai_prompt_has_data() { let p=build_ai_prompt(&st(3),false,6); assert!(p.contains("3")&&p.contains("2000")); }
-    #[test] fn ai_prompt_has_sips() { let p=build_ai_prompt(&st(3),false,6); assert!(p.contains("6")); }
-    #[test] fn ai_prompt_has_snooze() { assert!(build_ai_prompt(&st(1),true,5).contains("snooze")); }
-    #[test] fn ai_prompt_no_snooze() { assert!(!build_ai_prompt(&st(1),false,5).contains("（這是一次提醒後 snooze 的再次提醒）")); }
-    #[test] fn report_goal_has_streak() { let s=ReminderState{date:"x".to_string(),drink_count:14,goal_ml:2000,per_drink_ml:30,current_streak:3,last_goal_date:None}; assert!(build_ai_report_prompt(&s,true).contains("3")); }
-    #[test] fn report_no_goal_has_date() { let s=ReminderState{date:"2025-03-17".to_string(),drink_count:5,goal_ml:2000,per_drink_ml:30,current_streak:0,last_goal_date:None}; assert!(build_ai_report_prompt(&s,false).contains("2025-03-17")); }
-    #[test] fn tc_morning() { assert_eq!(TimeContext::from_time(&t(1,30)),TimeContext::MorningStart); assert_eq!(TimeContext::from_time(&t(2,59)),TimeContext::MorningStart); }
-    #[test] fn tc_midday() { assert_eq!(TimeContext::from_time(&t(3,0)),TimeContext::Midday); }
-    #[test] fn tc_afternoon() { assert_eq!(TimeContext::from_time(&t(6,0)),TimeContext::Afternoon); }
-    #[test] fn tc_closing() { assert_eq!(TimeContext::from_time(&t(9,0)),TimeContext::Closing); assert_eq!(TimeContext::from_time(&t(10,29)),TimeContext::Closing); }
-    #[test] fn tc_outside() { assert_eq!(TimeContext::from_time(&t(0,0)),TimeContext::Outside); assert_eq!(TimeContext::from_time(&t(10,30)),TimeContext::Outside); }
-    #[test] fn ml_consumed() { assert_eq!(st(4).ml_consumed(),120); }
-    #[test] fn goal_reached() { assert!(st(67).goal_reached()); assert!(!st(5).goal_reached()); }
-    #[test] fn db_get_state() { let h=hook(); let s=h.get_state("2025-03-17").unwrap(); assert_eq!(s.drink_count,0); assert_eq!(s.goal_ml,2000); }
-    #[test] fn db_record_drink() { let h=hook(); assert_eq!(h.record_drink("d",5).unwrap().drink_count,5); assert_eq!(h.record_drink("d",6).unwrap().drink_count,11); }
-    #[test] fn db_schedule_next() { let h=hook(); h.schedule_next(1700).unwrap(); assert_eq!(h.get_scheduler_value("next_reminder").unwrap(),Some("1700".to_string())); }
-    #[test] fn db_set_get() { let h=hook(); h.set_scheduler_value("k","v").unwrap(); assert_eq!(h.get_scheduler_value("k").unwrap(),Some("v".to_string())); }
-    #[test] fn db_clear() { let h=hook(); h.set_scheduler_value("k","v").unwrap(); h.clear_pending("k").unwrap(); assert!(h.get_scheduler_value("k").unwrap().is_none()); }
-    #[test] fn db_finalize_streak_up() { let h=hook(); for _ in 0..67 { h.record_drink("d",1).unwrap(); } h.finalize_day("d").unwrap(); assert_eq!(h.get_state("d").unwrap().current_streak,1); }
-    #[test] fn db_finalize_streak_reset() { let h=hook(); { let db=h.db.lock(); db.execute("UPDATE streak SET current_streak=3 WHERE id=1",[]).unwrap(); } h.record_drink("d",1).unwrap(); h.finalize_day("d").unwrap(); assert_eq!(h.get_state("d").unwrap().current_streak,0); }
-    #[test] fn sip_range_valid() { for _ in 0..50 { use rand::RngExt; let mut rng = rand::rng(); let s: u32 = rng.random_range(5u32..=8u32); assert!(s>=5&&s<=8); } }
+    #[test]
+    fn work_time_inside() {
+        assert!(is_work_time(&t(2, 0), "01:30", "10:30"));
+    }
+    #[test]
+    fn work_time_start_incl() {
+        assert!(is_work_time(&t(1, 30), "01:30", "10:30"));
+    }
+    #[test]
+    fn work_time_end_excl() {
+        assert!(!is_work_time(&t(10, 30), "01:30", "10:30"));
+    }
+    #[test]
+    fn work_time_before() {
+        assert!(!is_work_time(&t(0, 0), "01:30", "10:30"));
+    }
+    #[test]
+    fn work_time_after() {
+        assert!(!is_work_time(&t(12, 0), "01:30", "10:30"));
+    }
+    #[test]
+    fn work_time_bad_fmt() {
+        assert!(!is_work_time(&t(2, 0), "1:30am", "10:30"));
+    }
+    #[test]
+    fn lunch_inside() {
+        assert!(is_lunch_window(&t(5, 0), "04:30", "05:30"));
+    }
+    #[test]
+    fn lunch_start_incl() {
+        assert!(is_lunch_window(&t(4, 30), "04:30", "05:30"));
+    }
+    #[test]
+    fn lunch_end_excl() {
+        assert!(!is_lunch_window(&t(5, 30), "04:30", "05:30"));
+    }
+    #[test]
+    fn lunch_outside() {
+        assert!(!is_lunch_window(&t(3, 0), "04:30", "05:30"));
+    }
+    #[test]
+    fn interval_range() {
+        for _ in 0..50 {
+            let s = next_interval_seconds(30, 50);
+            assert!(s >= 1800 && s <= 3000);
+        }
+    }
+    #[test]
+    fn interval_equal() {
+        assert_eq!(next_interval_seconds(45, 45), 2700);
+    }
+    #[test]
+    fn interval_reversed() {
+        assert_eq!(next_interval_seconds(60, 30), 3600);
+    }
+    #[test]
+    fn bar_empty() {
+        let b = build_progress_bar(0, 10);
+        assert_eq!(b.chars().count(), 10);
+        assert!(b.chars().all(|c| c == '\u{2591}'));
+    }
+    #[test]
+    fn bar_full() {
+        let b = build_progress_bar(10, 10);
+        assert!(b.chars().all(|c| c == '\u{2588}'));
+    }
+    #[test]
+    fn bar_half() {
+        let b = build_progress_bar(5, 10);
+        assert_eq!(b.chars().filter(|c| *c == '\u{2588}').count(), 5);
+    }
+    #[test]
+    fn bar_overflow() {
+        let b = build_progress_bar(20, 10);
+        assert!(b.chars().all(|c| c == '\u{2588}'));
+    }
+    #[test]
+    fn bar_zero_total() {
+        let b = build_progress_bar(5, 0);
+        assert!(b.chars().all(|c| c == '\u{2591}'));
+    }
+    #[test]
+    fn bar_always_10() {
+        for i in 0..=15 {
+            assert_eq!(build_progress_bar(i, 13).chars().count(), 10);
+        }
+    }
+    #[test]
+    fn ai_resp_trim() {
+        assert_eq!(parse_ai_response("  hi  "), "hi");
+    }
+    #[test]
+    fn ai_resp_empty() {
+        assert!(!parse_ai_response("").is_empty());
+    }
+    #[test]
+    fn ai_resp_ws() {
+        assert!(!parse_ai_response("   ").is_empty());
+    }
+    #[test]
+    fn ai_prompt_has_data() {
+        let p = build_ai_prompt(&st(3), false, 6);
+        assert!(p.contains("3") && p.contains("2000"));
+    }
+    #[test]
+    fn ai_prompt_has_sips() {
+        let p = build_ai_prompt(&st(3), false, 6);
+        assert!(p.contains("6"));
+    }
+    #[test]
+    fn ai_prompt_has_snooze() {
+        assert!(build_ai_prompt(&st(1), true, 5).contains("snooze"));
+    }
+    #[test]
+    fn ai_prompt_no_snooze() {
+        assert!(!build_ai_prompt(&st(1), false, 5).contains("（這是一次提醒後 snooze 的再次提醒）"));
+    }
+    #[test]
+    fn report_goal_has_streak() {
+        let s = ReminderState {
+            date: "x".to_string(),
+            drink_count: 14,
+            goal_ml: 2000,
+            per_drink_ml: 30,
+            current_streak: 3,
+            last_goal_date: None,
+        };
+        assert!(build_ai_report_prompt(&s, true).contains("3"));
+    }
+    #[test]
+    fn report_no_goal_has_date() {
+        let s = ReminderState {
+            date: "2025-03-17".to_string(),
+            drink_count: 5,
+            goal_ml: 2000,
+            per_drink_ml: 30,
+            current_streak: 0,
+            last_goal_date: None,
+        };
+        assert!(build_ai_report_prompt(&s, false).contains("2025-03-17"));
+    }
+    #[test]
+    fn tc_morning() {
+        assert_eq!(TimeContext::from_time(&t(1, 30)), TimeContext::MorningStart);
+        assert_eq!(TimeContext::from_time(&t(2, 59)), TimeContext::MorningStart);
+    }
+    #[test]
+    fn tc_midday() {
+        assert_eq!(TimeContext::from_time(&t(3, 0)), TimeContext::Midday);
+    }
+    #[test]
+    fn tc_afternoon() {
+        assert_eq!(TimeContext::from_time(&t(6, 0)), TimeContext::Afternoon);
+    }
+    #[test]
+    fn tc_closing() {
+        assert_eq!(TimeContext::from_time(&t(9, 0)), TimeContext::Closing);
+        assert_eq!(TimeContext::from_time(&t(10, 29)), TimeContext::Closing);
+    }
+    #[test]
+    fn tc_outside() {
+        assert_eq!(TimeContext::from_time(&t(0, 0)), TimeContext::Outside);
+        assert_eq!(TimeContext::from_time(&t(10, 30)), TimeContext::Outside);
+    }
+    #[test]
+    fn ml_consumed() {
+        assert_eq!(st(4).ml_consumed(), 120);
+    }
+    #[test]
+    fn goal_reached() {
+        assert!(st(67).goal_reached());
+        assert!(!st(5).goal_reached());
+    }
+    #[test]
+    fn db_get_state() {
+        let h = hook();
+        let s = h.get_state("2025-03-17").unwrap();
+        assert_eq!(s.drink_count, 0);
+        assert_eq!(s.goal_ml, 2000);
+    }
+    #[test]
+    fn db_record_drink() {
+        let h = hook();
+        assert_eq!(h.record_drink("d", 5).unwrap().drink_count, 5);
+        assert_eq!(h.record_drink("d", 6).unwrap().drink_count, 11);
+    }
+    #[test]
+    fn db_schedule_next() {
+        let h = hook();
+        h.schedule_next(1700).unwrap();
+        assert_eq!(
+            h.get_scheduler_value("next_reminder").unwrap(),
+            Some("1700".to_string())
+        );
+    }
+    #[test]
+    fn db_set_get() {
+        let h = hook();
+        h.set_scheduler_value("k", "v").unwrap();
+        assert_eq!(h.get_scheduler_value("k").unwrap(), Some("v".to_string()));
+    }
+    #[test]
+    fn db_clear() {
+        let h = hook();
+        h.set_scheduler_value("k", "v").unwrap();
+        h.clear_pending("k").unwrap();
+        assert!(h.get_scheduler_value("k").unwrap().is_none());
+    }
+    #[test]
+    fn db_finalize_streak_up() {
+        let h = hook();
+        for _ in 0..67 {
+            h.record_drink("d", 1).unwrap();
+        }
+        h.finalize_day("d").unwrap();
+        assert_eq!(h.get_state("d").unwrap().current_streak, 1);
+    }
+    #[test]
+    fn db_finalize_streak_reset() {
+        let h = hook();
+        {
+            let db = h.db.lock();
+            db.execute("UPDATE streak SET current_streak=3 WHERE id=1", [])
+                .unwrap();
+        }
+        h.record_drink("d", 1).unwrap();
+        h.finalize_day("d").unwrap();
+        assert_eq!(h.get_state("d").unwrap().current_streak, 0);
+    }
+    #[test]
+    fn sip_range_valid() {
+        for _ in 0..50 {
+            use rand::RngExt;
+            let mut rng = rand::rng();
+            let s: u32 = rng.random_range(5u32..=8u32);
+            assert!(s >= 5 && s <= 8);
+        }
+    }
 
     // Per-message dedup: processed_msg_{message_id} key guards against duplicate presses
-    #[test] fn per_msg_dedup_first_press_allowed() {
+    #[test]
+    fn per_msg_dedup_first_press_allowed() {
         // No processed_msg entry → first press is allowed
         let h = hook();
         let message_id: i64 = 42;
         let key = format!("processed_msg_{}", message_id);
         let val = h.get_scheduler_value(&key).unwrap();
-        assert!(val.is_none(), "no processed entry yet → press should be allowed");
+        assert!(
+            val.is_none(),
+            "no processed entry yet → press should be allowed"
+        );
     }
 
-    #[test] fn per_msg_dedup_second_press_blocked() {
+    #[test]
+    fn per_msg_dedup_second_press_blocked() {
         // After first press marks the message as processed, second press is blocked
         let h = hook();
         let message_id: i64 = 42;
         let key = format!("processed_msg_{}", message_id);
         h.set_scheduler_value(&key, "1").unwrap();
         let val = h.get_scheduler_value(&key).unwrap();
-        assert!(val.is_some(), "processed entry exists → duplicate press should be blocked");
+        assert!(
+            val.is_some(),
+            "processed entry exists → duplicate press should be blocked"
+        );
     }
 
-    #[test] fn per_msg_dedup_old_button_independent() {
+    #[test]
+    fn per_msg_dedup_old_button_independent() {
         // Old message (id=10) can be independently marked processed without affecting new pending (id=20)
         let h = hook();
         h.set_scheduler_value("pending_message_id", "20").unwrap();
@@ -995,12 +1501,16 @@ mod tests {
         // old button blocked
         assert!(h.get_scheduler_value("processed_msg_10").unwrap().is_some());
         // new pending still intact
-        assert_eq!(h.get_scheduler_value("pending_message_id").unwrap(), Some("20".to_string()));
+        assert_eq!(
+            h.get_scheduler_value("pending_message_id").unwrap(),
+            Some("20".to_string())
+        );
         // new button not yet processed
         assert!(h.get_scheduler_value("processed_msg_20").unwrap().is_none());
     }
 
-    #[test] fn per_msg_dedup_pending_cleared_when_matching() {
+    #[test]
+    fn per_msg_dedup_pending_cleared_when_matching() {
         // When the pressed message_id matches pending_message_id, pending state is cleared
         let h = hook();
         h.set_scheduler_value("pending_message_id", "7").unwrap();
@@ -1008,29 +1518,42 @@ mod tests {
         h.set_scheduler_value("snooze_sent", "false").unwrap();
         // Simulate the clear-pending logic for a matching message_id
         let pending_id = h.get_scheduler_value("pending_message_id").unwrap();
-        let pending_matches = pending_id.as_deref().and_then(|s| s.parse::<i64>().ok()) == Some(7i64);
+        let pending_matches =
+            pending_id.as_deref().and_then(|s| s.parse::<i64>().ok()) == Some(7i64);
         assert!(pending_matches);
         h.clear_pending("pending_message_id").unwrap();
         h.clear_pending("pending_sent_at").unwrap();
         h.clear_pending("snooze_sent").unwrap();
-        assert!(h.get_scheduler_value("pending_message_id").unwrap().is_none());
+        assert!(h
+            .get_scheduler_value("pending_message_id")
+            .unwrap()
+            .is_none());
         assert!(h.get_scheduler_value("pending_sent_at").unwrap().is_none());
     }
 
-    #[test] fn per_msg_dedup_pending_kept_when_not_matching() {
+    #[test]
+    fn per_msg_dedup_pending_kept_when_not_matching() {
         // When the pressed message_id does NOT match pending_message_id (old/snooze button),
         // pending state for the new message must remain intact
         let h = hook();
         h.set_scheduler_value("pending_message_id", "20").unwrap(); // new message is pending
-        // User presses old message button (id=10)
+                                                                    // User presses old message button (id=10)
         let pending_id = h.get_scheduler_value("pending_message_id").unwrap();
-        let pending_matches = pending_id.as_deref().and_then(|s| s.parse::<i64>().ok()) == Some(10i64);
-        assert!(!pending_matches, "old button should NOT match current pending");
+        let pending_matches =
+            pending_id.as_deref().and_then(|s| s.parse::<i64>().ok()) == Some(10i64);
+        assert!(
+            !pending_matches,
+            "old button should NOT match current pending"
+        );
         // pending_message_id remains "20" — new message is still actionable
-        assert_eq!(h.get_scheduler_value("pending_message_id").unwrap(), Some("20".to_string()));
+        assert_eq!(
+            h.get_scheduler_value("pending_message_id").unwrap(),
+            Some("20".to_string())
+        );
     }
 
-    #[test] fn processed_msg_cleanup_via_db() {
+    #[test]
+    fn processed_msg_cleanup_via_db() {
         // Verify that a DELETE LIKE query removes all processed_msg_* entries
         let h = hook();
         h.set_scheduler_value("processed_msg_1", "1").unwrap();
@@ -1038,10 +1561,17 @@ mod tests {
         h.set_scheduler_value("next_reminder", "9999").unwrap(); // unrelated key, must survive
         {
             let db = h.db.lock();
-            db.execute("DELETE FROM scheduler_state WHERE key LIKE 'processed_msg_%'", []).unwrap();
+            db.execute(
+                "DELETE FROM scheduler_state WHERE key LIKE 'processed_msg_%'",
+                [],
+            )
+            .unwrap();
         }
         assert!(h.get_scheduler_value("processed_msg_1").unwrap().is_none());
         assert!(h.get_scheduler_value("processed_msg_2").unwrap().is_none());
-        assert_eq!(h.get_scheduler_value("next_reminder").unwrap(), Some("9999".to_string()));
+        assert_eq!(
+            h.get_scheduler_value("next_reminder").unwrap(),
+            Some("9999".to_string())
+        );
     }
 }

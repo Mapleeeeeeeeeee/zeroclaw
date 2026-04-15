@@ -49,3 +49,5 @@ lcov.info
 
 # Wrangler cache
 .wrangler/.github/workflows/
+
+*.bak
