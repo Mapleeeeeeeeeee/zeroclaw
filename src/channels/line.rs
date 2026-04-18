@@ -176,7 +176,8 @@ impl TextMessage {
                     let name: String = chars[start..end].iter().collect();
                     // Fuzzy match: @Emily matches display name containing "Emily"
                     let matched_uid = name_to_uid.get(&name).cloned().or_else(|| {
-                        name_to_uid.iter()
+                        name_to_uid
+                            .iter()
                             .find(|(display, _)| display.contains(&name))
                             .map(|(_, uid)| uid.clone())
                     });
@@ -196,20 +197,33 @@ impl TextMessage {
         // Apply replacements
         for (original, placeholder, uid) in &replacements {
             text = text.replacen(original, placeholder, 1);
-            let key = placeholder.trim_matches(|c| c == '{' || c == '}').to_string();
-            substitution.insert(key, SubstitutionValue::Mention(MentionSubstitution {
-                sub_type: "mention".to_string(),
-                mentionee: MentioneeRef {
-                    mentionee_type: "user".to_string(),
-                    user_id: Some(uid.clone()),
-                },
-            }));
+            let key = placeholder
+                .trim_matches(|c| c == '{' || c == '}')
+                .to_string();
+            substitution.insert(
+                key,
+                SubstitutionValue::Mention(MentionSubstitution {
+                    sub_type: "mention".to_string(),
+                    mentionee: MentioneeRef {
+                        mentionee_type: "user".to_string(),
+                        user_id: Some(uid.clone()),
+                    },
+                }),
+            );
         }
 
         if substitution.is_empty() {
-            Self { message_type: "text".to_string(), text, substitution: None }
+            Self {
+                message_type: "text".to_string(),
+                text,
+                substitution: None,
+            }
         } else {
-            Self { message_type: "textV2".to_string(), text, substitution: Some(substitution) }
+            Self {
+                message_type: "textV2".to_string(),
+                text,
+                substitution: Some(substitution),
+            }
         }
     }
 }
@@ -235,7 +249,9 @@ impl WebhookState {
     }
 
     fn is_group_allowed(&self, group_id: &str) -> bool {
-        self.allowed_groups.iter().any(|g| g == "*" || g == group_id)
+        self.allowed_groups
+            .iter()
+            .any(|g| g == "*" || g == group_id)
     }
 }
 
@@ -271,7 +287,11 @@ impl LineChannel {
             .ok()
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default();
-        info!("Loaded {} member(s) from cache file: {}", initial_cache.len(), cache_path);
+        info!(
+            "Loaded {} member(s) from cache file: {}",
+            initial_cache.len(),
+            cache_path
+        );
         Self {
             channel_access_token: channel_access_token.into(),
             channel_secret: channel_secret.into(),
@@ -302,7 +322,9 @@ impl LineChannel {
             reply_token: reply_token.to_string(),
             messages,
         };
-        let resp = self.client.post(LINE_REPLY_API)
+        let resp = self
+            .client
+            .post(LINE_REPLY_API)
             .bearer_auth(&self.channel_access_token)
             .json(&body)
             .send()
@@ -321,7 +343,9 @@ impl LineChannel {
             to: to.to_string(),
             messages,
         };
-        let resp = self.client.post(LINE_PUSH_API)
+        let resp = self
+            .client
+            .post(LINE_PUSH_API)
             .bearer_auth(&self.channel_access_token)
             .json(&body)
             .send()
@@ -347,11 +371,19 @@ impl Channel for LineChannel {
         // Build a name->user_id reverse map from the member_cache (which is user_id->name)
         let name_to_uid: std::collections::HashMap<String, String> = {
             let cache = self.member_cache.lock().await;
-            let map: std::collections::HashMap<String, String> = cache.iter().map(|(uid, name)| (name.clone(), uid.clone())).collect();
-            tracing::debug!("LINE mention: member_cache has {} entries, name_to_uid: {:?}", cache.len(), map.keys().collect::<Vec<_>>());
+            let map: std::collections::HashMap<String, String> = cache
+                .iter()
+                .map(|(uid, name)| (name.clone(), uid.clone()))
+                .collect();
+            tracing::debug!(
+                "LINE mention: member_cache has {} entries, name_to_uid: {:?}",
+                cache.len(),
+                map.keys().collect::<Vec<_>>()
+            );
             map
         };
-        let messages: Vec<TextMessage> = chunks.into_iter()
+        let messages: Vec<TextMessage> = chunks
+            .into_iter()
             .map(|chunk| TextMessage::with_mentions(chunk, &name_to_uid))
             .collect();
 
@@ -395,18 +427,25 @@ impl Channel for LineChannel {
             .with_context(|| format!("Failed to bind webhook server on {addr}"))?;
 
         info!("LINE webhook server listening on {addr}");
-        axum::serve(listener, app).await.context("LINE webhook server error")?;
+        axum::serve(listener, app)
+            .await
+            .context("LINE webhook server error")?;
         Ok(())
     }
 
     async fn health_check(&self) -> bool {
-        match self.client.get("https://api.line.me/v2/bot/info")
+        match self
+            .client
+            .get("https://api.line.me/v2/bot/info")
             .bearer_auth(&self.channel_access_token)
             .send()
             .await
         {
             Ok(resp) => resp.status().is_success(),
-            Err(e) => { warn!("LINE health check failed: {e}"); false }
+            Err(e) => {
+                warn!("LINE health check failed: {e}");
+                false
+            }
         }
     }
 }
@@ -422,33 +461,30 @@ async fn fetch_display_name(
     group_id: Option<&str>,
 ) -> String {
     let url = if let Some(gid) = group_id {
-        format!("https://api.line.me/v2/bot/group/{}/member/{}", gid, user_id)
+        format!(
+            "https://api.line.me/v2/bot/group/{}/member/{}",
+            gid, user_id
+        )
     } else {
         format!("https://api.line.me/v2/bot/profile/{}", user_id)
     };
 
-    let result = client
-        .get(&url)
-        .bearer_auth(token)
-        .send()
-        .await;
+    let result = client.get(&url).bearer_auth(token).send().await;
 
     match result {
-        Ok(resp) if resp.status().is_success() => {
-            match resp.json::<serde_json::Value>().await {
-                Ok(json) => {
-                    if let Some(name) = json.get("displayName").and_then(|v| v.as_str()) {
-                        return name.to_string();
-                    }
-                    warn!("LINE profile response missing displayName for {user_id}");
-                    user_id.to_string()
+        Ok(resp) if resp.status().is_success() => match resp.json::<serde_json::Value>().await {
+            Ok(json) => {
+                if let Some(name) = json.get("displayName").and_then(|v| v.as_str()) {
+                    return name.to_string();
                 }
-                Err(e) => {
-                    warn!("Failed to parse LINE profile response for {user_id}: {e}");
-                    user_id.to_string()
-                }
+                warn!("LINE profile response missing displayName for {user_id}");
+                user_id.to_string()
             }
-        }
+            Err(e) => {
+                warn!("Failed to parse LINE profile response for {user_id}: {e}");
+                user_id.to_string()
+            }
+        },
         Ok(resp) => {
             warn!("LINE profile API returned {} for {user_id}", resp.status());
             user_id.to_string()
@@ -487,7 +523,11 @@ async fn resolve_display_name(
         if let Err(e) = std::fs::write(&state.cache_path, &json) {
             warn!("Failed to write member cache to {}: {e}", state.cache_path);
         } else {
-            debug!("Member cache saved ({} entries) to {}", cache_snapshot.len(), state.cache_path);
+            debug!(
+                "Member cache saved ({} entries) to {}",
+                cache_snapshot.len(),
+                state.cache_path
+            );
         }
     }
 
@@ -499,9 +539,15 @@ async fn handle_webhook(
     headers: HeaderMap,
     body: Bytes,
 ) -> StatusCode {
-    let signature = match headers.get("x-line-signature").and_then(|v| v.to_str().ok()) {
+    let signature = match headers
+        .get("x-line-signature")
+        .and_then(|v| v.to_str().ok())
+    {
         Some(s) => s.to_string(),
-        None => { warn!("Missing x-line-signature"); return StatusCode::UNAUTHORIZED; }
+        None => {
+            warn!("Missing x-line-signature");
+            return StatusCode::UNAUTHORIZED;
+        }
     };
 
     if !verify_signature(&state.channel_secret, &body, &signature) {
@@ -511,7 +557,10 @@ async fn handle_webhook(
 
     let payload: WebhookPayload = match serde_json::from_slice(&body) {
         Ok(p) => p,
-        Err(e) => { error!("Failed to parse webhook: {e}"); return StatusCode::BAD_REQUEST; }
+        Err(e) => {
+            error!("Failed to parse webhook: {e}");
+            return StatusCode::BAD_REQUEST;
+        }
     };
 
     for event in payload.events {
@@ -519,10 +568,15 @@ async fn handle_webhook(
             LineEvent::Message(evt) => handle_message_event(&state, evt).await,
             LineEvent::Follow(evt) => handle_follow_event(&state, evt).await,
             LineEvent::Unfollow(evt) => {
-                info!("User unfollowed: {}", evt.source.user_id.as_deref().unwrap_or("unknown"));
+                info!(
+                    "User unfollowed: {}",
+                    evt.source.user_id.as_deref().unwrap_or("unknown")
+                );
             }
             LineEvent::Join(evt) => handle_join_event(&state, evt).await,
-            LineEvent::Unknown => { debug!("Unknown LINE event, ignoring"); }
+            LineEvent::Unknown => {
+                debug!("Unknown LINE event, ignoring");
+            }
         }
     }
 
@@ -532,16 +586,26 @@ async fn handle_webhook(
 async fn handle_message_event(state: &WebhookState, evt: MessageEvent) {
     let text = match &evt.message.text {
         Some(t) if evt.message.message_type == "text" => t.clone(),
-        _ => { debug!("Ignoring non-text message: {}", evt.message.message_type); return; }
+        _ => {
+            debug!("Ignoring non-text message: {}", evt.message.message_type);
+            return;
+        }
     };
 
-    info!("LINE source: type={} user={:?} group={:?} room={:?}", evt.source.source_type, evt.source.user_id, evt.source.group_id, evt.source.room_id);
+    info!(
+        "LINE source: type={} user={:?} group={:?} room={:?}",
+        evt.source.source_type, evt.source.user_id, evt.source.group_id, evt.source.room_id
+    );
     let (sender_id, reply_target, thread_ts) = resolve_source(&evt.source);
 
     if let Some(ref gid) = evt.source.group_id {
-        if !state.is_group_allowed(gid) { return; }
+        if !state.is_group_allowed(gid) {
+            return;
+        }
     } else if let Some(ref uid) = evt.source.user_id {
-        if !state.is_user_allowed(uid) { return; }
+        if !state.is_user_allowed(uid) {
+            return;
+        }
     }
 
     // Resolve display name and prepend to message content
@@ -558,15 +622,18 @@ async fn handle_message_event(state: &WebhookState, evt: MessageEvent) {
         // Group message without mention: send as __silent: to add to in-memory history
         // without triggering AI response
         debug!("Group message without mention, sending as silent: {content}");
-        let _ = state.tx.send(ChannelMessage {
-            id: evt.message.id.clone(),
-            sender: sender_id,
-            reply_target,
-            content: format!("__silent:{}", content),
-            channel: state.channel_name.clone(),
-            timestamp: evt.timestamp / 1000,
-            thread_ts,
-        }).await;
+        let _ = state
+            .tx
+            .send(ChannelMessage {
+                id: evt.message.id.clone(),
+                sender: sender_id,
+                reply_target,
+                content: format!("__silent:{}", content),
+                channel: state.channel_name.clone(),
+                timestamp: evt.timestamp / 1000,
+                thread_ts,
+            })
+            .await;
         return;
     }
 
@@ -574,7 +641,8 @@ async fn handle_message_event(state: &WebhookState, evt: MessageEvent) {
     if evt.source.group_id.is_none() && evt.source.room_id.is_none() {
         if let Some(ref uid) = evt.source.user_id {
             let client = Client::new();
-            let _ = client.post("https://api.line.me/v2/bot/chat/loading/start")
+            let _ = client
+                .post("https://api.line.me/v2/bot/chat/loading/start")
                 .bearer_auth(&state.channel_access_token)
                 .json(&serde_json::json!({"chatId": uid, "loadingSeconds": 60}))
                 .send()
@@ -583,15 +651,18 @@ async fn handle_message_event(state: &WebhookState, evt: MessageEvent) {
     }
     store_reply_token(&state.reply_tokens, &reply_target, &evt.reply_token).await;
 
-    let _ = state.tx.send(ChannelMessage {
-        id: evt.message.id,
-        sender: sender_id,
-        reply_target,
-        content,
-        channel: state.channel_name.clone(),
-        timestamp: evt.timestamp / 1000,
-        thread_ts,
-    }).await;
+    let _ = state
+        .tx
+        .send(ChannelMessage {
+            id: evt.message.id,
+            sender: sender_id,
+            reply_target,
+            content,
+            channel: state.channel_name.clone(),
+            timestamp: evt.timestamp / 1000,
+            thread_ts,
+        })
+        .await;
 }
 
 async fn handle_follow_event(state: &WebhookState, evt: FollowEvent) {
@@ -599,23 +670,32 @@ async fn handle_follow_event(state: &WebhookState, evt: FollowEvent) {
         Some(id) => id.clone(),
         None => return,
     };
-    if !state.is_user_allowed(&user_id) { return; }
+    if !state.is_user_allowed(&user_id) {
+        return;
+    }
     info!("New LINE follower: {user_id}");
     store_reply_token(&state.reply_tokens, &user_id, &evt.reply_token).await;
-    let _ = state.tx.send(ChannelMessage {
-        id: format!("follow-{}", evt.timestamp),
-        sender: user_id.clone(),
-        reply_target: user_id,
-        content: "/follow".to_string(),
-        channel: state.channel_name.clone(),
-        timestamp: evt.timestamp / 1000,
-        thread_ts: None,
-    }).await;
+    let _ = state
+        .tx
+        .send(ChannelMessage {
+            id: format!("follow-{}", evt.timestamp),
+            sender: user_id.clone(),
+            reply_target: user_id,
+            content: "/follow".to_string(),
+            channel: state.channel_name.clone(),
+            timestamp: evt.timestamp / 1000,
+            thread_ts: None,
+        })
+        .await;
 }
 
 async fn handle_join_event(state: &WebhookState, evt: JoinEvent) {
     // Access control: only respond in allowed groups
-    let check_gid = evt.source.group_id.as_deref().or(evt.source.room_id.as_deref());
+    let check_gid = evt
+        .source
+        .group_id
+        .as_deref()
+        .or(evt.source.room_id.as_deref());
     if let Some(gid) = check_gid {
         if !state.is_group_allowed(gid) {
             info!("Ignoring join event for non-allowed group: {gid}");
@@ -626,22 +706,28 @@ async fn handle_join_event(state: &WebhookState, evt: JoinEvent) {
         Some(id) => id.clone(),
         None => {
             // Could be a room join; use room_id or a fallback
-            evt.source.room_id.clone().unwrap_or_else(|| "unknown".into())
+            evt.source
+                .room_id
+                .clone()
+                .unwrap_or_else(|| "unknown".into())
         }
     };
 
     info!("Bot joined group/room: {group_id}");
     store_reply_token(&state.reply_tokens, &group_id, &evt.reply_token).await;
 
-    let _ = state.tx.send(ChannelMessage {
-        id: format!("join-{}", evt.timestamp),
-        sender: "system".to_string(),
-        reply_target: group_id,
-        content: "/join".to_string(),
-        channel: state.channel_name.clone(),
-        timestamp: evt.timestamp / 1000,
-        thread_ts: None,
-    }).await;
+    let _ = state
+        .tx
+        .send(ChannelMessage {
+            id: format!("join-{}", evt.timestamp),
+            sender: "system".to_string(),
+            reply_target: group_id,
+            content: "/join".to_string(),
+            channel: state.channel_name.clone(),
+            timestamp: evt.timestamp / 1000,
+            thread_ts: None,
+        })
+        .await;
 }
 
 fn resolve_source(source: &EventSource) -> (String, String, Option<String>) {
@@ -677,7 +763,10 @@ async fn store_reply_token(
 ) {
     let mut map = tokens.lock().await;
     map.retain(|_, (_, exp)| *exp > unix_now());
-    map.insert(key.to_string(), (token.to_string(), unix_now() + REPLY_TOKEN_TTL_SECS));
+    map.insert(
+        key.to_string(),
+        (token.to_string(), unix_now() + REPLY_TOKEN_TTL_SECS),
+    );
 }
 
 fn split_message(content: &str, max_len: usize) -> Vec<String> {
@@ -698,5 +787,8 @@ fn split_message(content: &str, max_len: usize) -> Vec<String> {
 }
 
 fn unix_now() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }

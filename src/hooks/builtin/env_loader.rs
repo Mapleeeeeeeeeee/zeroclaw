@@ -16,10 +16,14 @@ pub(super) fn load_env_value(workspace_dir: &Path, key: &str) -> anyhow::Result<
             continue;
         }
         let line = line.strip_prefix("export ").map(str::trim).unwrap_or(line);
-        let Some((k, v)) = line.split_once('=') else { continue; };
+        let Some((k, v)) = line.split_once('=') else {
+            continue;
+        };
         if k.trim().eq_ignore_ascii_case(key) {
             let v = v.trim();
-            let v = v.strip_prefix('"').and_then(|s| s.strip_suffix('"'))
+            let v = v
+                .strip_prefix('"')
+                .and_then(|s| s.strip_suffix('"'))
                 .or_else(|| v.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')))
                 .unwrap_or(v);
             return Ok(v.trim().to_string());
@@ -126,7 +130,8 @@ mod tests {
     #[test]
     fn env_loader_handles_mixed_content() {
         let dir = tempfile::TempDir::new().unwrap();
-        let content = "# leading comment\n\nexport SKIP=ignored\nFOO=\"hello world\"\n# trailing comment\n";
+        let content =
+            "# leading comment\n\nexport SKIP=ignored\nFOO=\"hello world\"\n# trailing comment\n";
         let workspace = write_env(&dir, content);
         let result = load_env_value(&workspace, "FOO").unwrap();
         assert_eq!(result, "hello world");

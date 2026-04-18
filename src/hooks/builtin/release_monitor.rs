@@ -1,16 +1,20 @@
-use std::sync::Arc;
+use crate::hooks::traits::HookHandler;
+use crate::providers::Provider;
 use async_trait::async_trait;
 use parking_lot::Mutex;
 use rusqlite::Connection;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use crate::hooks::traits::HookHandler;
-use crate::providers::Provider;
+use std::sync::Arc;
 
 pub(super) const SECTION_NAME: &str = "release_monitor";
 
-fn default_release_check_interval() -> u32 { 60 }
-fn default_release_db_path() -> String { "/home/azureuser/.release-monitor/releases.db".to_string() }
+fn default_release_check_interval() -> u32 {
+    60
+}
+fn default_release_db_path() -> String {
+    "/home/azureuser/.release-monitor/releases.db".to_string()
+}
 fn default_release_repos() -> Vec<String> {
     vec![
         "anthropics/claude-code".to_string(),
@@ -66,7 +70,13 @@ pub struct ReleaseMonitorHook {
 }
 
 impl ReleaseMonitorHook {
-    pub fn new(config: ReleaseMonitorConfig, workspace_dir: &std::path::Path, identity: String, provider: Arc<dyn Provider>, model: String) -> Result<Self, anyhow::Error> {
+    pub fn new(
+        config: ReleaseMonitorConfig,
+        workspace_dir: &std::path::Path,
+        identity: String,
+        provider: Arc<dyn Provider>,
+        model: String,
+    ) -> Result<Self, anyhow::Error> {
         if config.db_path != ":memory:" {
             if let Some(parent) = std::path::Path::new(&config.db_path).parent() {
                 if !parent.as_os_str().is_empty() {
@@ -83,35 +93,55 @@ impl ReleaseMonitorHook {
             CREATE TABLE IF NOT EXISTS monitor_state (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
-            );"
+            );",
         )?;
         let tg_token = super::env_loader::load_env_value(workspace_dir, "TG_BOT_TOKEN")?;
-        Ok(Self { config, db: Arc::new(Mutex::new(conn)), http_client: reqwest::Client::new(), provider, model, identity, tg_token })
+        Ok(Self {
+            config,
+            db: Arc::new(Mutex::new(conn)),
+            http_client: reqwest::Client::new(),
+            provider,
+            model,
+            identity,
+            tg_token,
+        })
     }
 
     fn get_cached_tag(&self, repo: &str) -> Option<String> {
         let db = self.db.lock();
-        db.query_row("SELECT tag FROM release_cache WHERE repo = ?1",
-            rusqlite::params![repo], |row| row.get(0)).ok()
+        db.query_row(
+            "SELECT tag FROM release_cache WHERE repo = ?1",
+            rusqlite::params![repo],
+            |row| row.get(0),
+        )
+        .ok()
     }
 
     fn set_cached_tag(&self, repo: &str, tag: &str) -> Result<(), anyhow::Error> {
         let db = self.db.lock();
-        db.execute("INSERT OR REPLACE INTO release_cache (repo, tag) VALUES (?1, ?2)",
-            rusqlite::params![repo, tag])?;
+        db.execute(
+            "INSERT OR REPLACE INTO release_cache (repo, tag) VALUES (?1, ?2)",
+            rusqlite::params![repo, tag],
+        )?;
         Ok(())
     }
 
     fn get_state(&self, key: &str) -> Option<String> {
         let db = self.db.lock();
-        db.query_row("SELECT value FROM monitor_state WHERE key = ?1",
-            rusqlite::params![key], |row| row.get(0)).ok()
+        db.query_row(
+            "SELECT value FROM monitor_state WHERE key = ?1",
+            rusqlite::params![key],
+            |row| row.get(0),
+        )
+        .ok()
     }
 
     fn set_state(&self, key: &str, value: &str) -> Result<(), anyhow::Error> {
         let db = self.db.lock();
-        db.execute("INSERT OR REPLACE INTO monitor_state (key, value) VALUES (?1, ?2)",
-            rusqlite::params![key, value])?;
+        db.execute(
+            "INSERT OR REPLACE INTO monitor_state (key, value) VALUES (?1, ?2)",
+            rusqlite::params![key, value],
+        )?;
         Ok(())
     }
 
@@ -121,7 +151,10 @@ impl ReleaseMonitorHook {
 
     /// Sanitize HTML: escape all & < >, then restore allowed tags
     fn sanitize_html(text: &str) -> String {
-        let mut s = text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+        let mut s = text
+            .replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;");
         for tag in ["b", "code", "i"] {
             s = s.replace(&format!("&lt;{tag}&gt;"), &format!("<{tag}>"));
             s = s.replace(&format!("&lt;/{tag}&gt;"), &format!("</{tag}>"));
@@ -136,8 +169,12 @@ impl ReleaseMonitorHook {
             "text": sanitized,
             "parse_mode": "HTML"
         });
-        let resp = self.http_client
-            .post(format!("https://api.telegram.org/bot{}/sendMessage", self.tg_token()))
+        let resp = self
+            .http_client
+            .post(format!(
+                "https://api.telegram.org/bot{}/sendMessage",
+                self.tg_token()
+            ))
             .json(&body)
             .send()
             .await?;
@@ -148,8 +185,12 @@ impl ReleaseMonitorHook {
                 "chat_id": self.config.chat_id,
                 "text": text,
             });
-            let _ = self.http_client
-                .post(format!("https://api.telegram.org/bot{}/sendMessage", self.tg_token()))
+            let _ = self
+                .http_client
+                .post(format!(
+                    "https://api.telegram.org/bot{}/sendMessage",
+                    self.tg_token()
+                ))
                 .json(&plain_body)
                 .send()
                 .await;
@@ -158,7 +199,12 @@ impl ReleaseMonitorHook {
     }
 
     async fn check_releases(&self) -> Result<(), anyhow::Error> {
-        let futures: Vec<_> = self.config.repos.iter().map(|repo| self.check_repo(repo)).collect();
+        let futures: Vec<_> = self
+            .config
+            .repos
+            .iter()
+            .map(|repo| self.check_repo(repo))
+            .collect();
         let results = futures_util::future::join_all(futures).await;
         for (repo, result) in self.config.repos.iter().zip(results) {
             if let Err(e) = result {
@@ -171,7 +217,8 @@ impl ReleaseMonitorHook {
     async fn check_repo(&self, repo: &str) -> Result<(), anyhow::Error> {
         // Fetch latest release from GitHub
         let url = format!("https://api.github.com/repos/{repo}/releases/latest");
-        let resp = self.http_client
+        let resp = self
+            .http_client
             .get(&url)
             .header("User-Agent", "zeroclaw-release-monitor/1.0")
             .send()
@@ -230,7 +277,11 @@ impl ReleaseMonitorHook {
             {changelog_truncated}"
         );
 
-        let summary = match self.provider.chat_with_system(Some(&self.identity), &prompt, &self.model, 0.7).await {
+        let summary = match self
+            .provider
+            .chat_with_system(Some(&self.identity), &prompt, &self.model, 0.7)
+            .await
+        {
             Ok(text) => text.trim().to_string(),
             Err(e) => {
                 tracing::warn!("release_monitor: AI summary failed for {repo}: {e}");
@@ -238,7 +289,8 @@ impl ReleaseMonitorHook {
             }
         };
 
-        let header = format!("🆕 <b>{repo}</b> 更新了！<code>{old_tag}</code> → <code>{latest}</code>");
+        let header =
+            format!("🆕 <b>{repo}</b> 更新了！<code>{old_tag}</code> → <code>{latest}</code>");
         let message = if summary.is_empty() {
             header
         } else {
@@ -251,7 +303,8 @@ impl ReleaseMonitorHook {
 
     pub async fn background_tick(&self) -> Result<(), anyhow::Error> {
         let now_epoch = chrono::Utc::now().timestamp() as u64;
-        let next_check = self.get_state("next_check")
+        let next_check = self
+            .get_state("next_check")
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or(0);
 
@@ -267,14 +320,19 @@ impl ReleaseMonitorHook {
 
 #[async_trait]
 impl HookHandler for ReleaseMonitorHook {
-    fn name(&self) -> &str { "release_monitor" }
+    fn name(&self) -> &str {
+        "release_monitor"
+    }
 
     async fn on_gateway_start(&self, _host: &str, _port: u16) {
         if !self.config.enabled {
             return;
         }
-        tracing::info!("📦 ReleaseMonitorHook registered (interval: {}min, repos: {})",
-            self.config.check_interval_minutes, self.config.repos.len());
+        tracing::info!(
+            "📦 ReleaseMonitorHook registered (interval: {}min, repos: {})",
+            self.config.check_interval_minutes,
+            self.config.repos.len()
+        );
 
         let config = self.config.clone();
         let db = Arc::clone(&self.db);
@@ -285,7 +343,15 @@ impl HookHandler for ReleaseMonitorHook {
         let tg_token = self.tg_token.clone();
 
         tokio::spawn(async move {
-            let hook = ReleaseMonitorHook { config, db, http_client, provider, model, identity, tg_token };
+            let hook = ReleaseMonitorHook {
+                config,
+                db,
+                http_client,
+                provider,
+                model,
+                identity,
+                tg_token,
+            };
             loop {
                 tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
                 if let Err(e) = hook.background_tick().await {
@@ -302,10 +368,21 @@ pub fn register(
     provider: &std::sync::Arc<dyn crate::providers::Provider>,
     model: &str,
 ) {
-    crate::extra_hook_lookup!(config.hooks.builtin.extra, SECTION_NAME, ReleaseMonitorConfig, rm_config);
-    let identity = std::fs::read_to_string(config.workspace_dir.join("IDENTITY.md"))
-        .unwrap_or_default();
-    match ReleaseMonitorHook::new(rm_config, &config.workspace_dir, identity, Arc::clone(provider), model.to_string()) {
+    crate::extra_hook_lookup!(
+        config.hooks.builtin.extra,
+        SECTION_NAME,
+        ReleaseMonitorConfig,
+        rm_config
+    );
+    let identity =
+        std::fs::read_to_string(config.workspace_dir.join("IDENTITY.md")).unwrap_or_default();
+    match ReleaseMonitorHook::new(
+        rm_config,
+        &config.workspace_dir,
+        identity,
+        Arc::clone(provider),
+        model.to_string(),
+    ) {
         Ok(hook) => {
             runner.register(Box::new(hook));
             tracing::info!("📦 Release monitor hook registered");
@@ -321,12 +398,22 @@ mod tests {
     #[test]
     fn release_monitor_default_repos_includes_all_four_cli_tools() {
         let config = ReleaseMonitorConfig::default();
-        assert_eq!(config.repos.len(), 4, "expected 4 default repos, got {}: {:?}", config.repos.len(), config.repos);
+        assert_eq!(
+            config.repos.len(),
+            4,
+            "expected 4 default repos, got {}: {:?}",
+            config.repos.len(),
+            config.repos
+        );
         assert!(config.repos.contains(&"anthropics/claude-code".to_string()));
-        assert!(config.repos.contains(&"google-gemini/gemini-cli".to_string()));
+        assert!(config
+            .repos
+            .contains(&"google-gemini/gemini-cli".to_string()));
         assert!(config.repos.contains(&"openai/codex".to_string()));
-        assert!(config.repos.contains(&"github/copilot-cli".to_string()),
-            "github/copilot-cli must be in defaults");
+        assert!(
+            config.repos.contains(&"github/copilot-cli".to_string()),
+            "github/copilot-cli must be in defaults"
+        );
     }
 
     #[test]
@@ -339,7 +426,10 @@ mod tests {
             repos = ["foo/bar", "baz/qux"]
         "#;
         let config: ReleaseMonitorConfig = toml::from_str(toml).expect("parse");
-        assert_eq!(config.repos, vec!["foo/bar".to_string(), "baz/qux".to_string()]);
+        assert_eq!(
+            config.repos,
+            vec!["foo/bar".to_string(), "baz/qux".to_string()]
+        );
         assert_eq!(config.check_interval_minutes, 30);
     }
 
@@ -368,14 +458,26 @@ command_logger = true
 enabled = true
 chat_id = "-1"
 "#;
-        let parsed: crate::config::schema::Config = toml::from_str(toml).expect("parse full config");
-        let rm_value = parsed.hooks.builtin.extra.get("release_monitor")
+        let parsed: crate::config::schema::Config =
+            toml::from_str(toml).expect("parse full config");
+        let rm_value = parsed
+            .hooks
+            .builtin
+            .extra
+            .get("release_monitor")
             .expect("release_monitor section must land in extra");
         let rm: ReleaseMonitorConfig = rm_value.clone().try_into().expect("decode config");
         assert!(rm.enabled);
         assert_eq!(rm.chat_id, "-1");
-        assert_eq!(rm.repos.len(), 4, "omitted repos should fall back to default_release_repos()");
+        assert_eq!(
+            rm.repos.len(),
+            4,
+            "omitted repos should fall back to default_release_repos()"
+        );
         assert!(rm.repos.contains(&"github/copilot-cli".to_string()));
-        assert_eq!(rm.check_interval_minutes, 60, "omitted interval should fall back to default_release_check_interval()");
+        assert_eq!(
+            rm.check_interval_minutes, 60,
+            "omitted interval should fall back to default_release_check_interval()"
+        );
     }
 }

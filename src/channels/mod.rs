@@ -24,6 +24,7 @@ pub mod imessage;
 pub mod irc;
 #[cfg(feature = "channel-lark")]
 pub mod lark;
+pub mod line;
 pub mod linq;
 #[cfg(feature = "channel-matrix")]
 pub mod matrix;
@@ -34,7 +35,6 @@ pub mod nextcloud_talk;
 pub mod nostr;
 pub mod notion;
 pub mod qq;
-pub mod line;
 pub mod reddit;
 pub mod session_backend;
 pub mod session_sqlite;
@@ -65,6 +65,7 @@ pub use imessage::IMessageChannel;
 pub use irc::IrcChannel;
 #[cfg(feature = "channel-lark")]
 pub use lark::LarkChannel;
+pub use line::LineChannel;
 pub use linq::LinqChannel;
 #[cfg(feature = "channel-matrix")]
 pub use matrix::MatrixChannel;
@@ -75,7 +76,6 @@ pub use nextcloud_talk::NextcloudTalkChannel;
 pub use nostr::NostrChannel;
 pub use notion::NotionChannel;
 pub use qq::QQChannel;
-pub use line::LineChannel;
 pub use reddit::RedditChannel;
 pub use signal::SignalChannel;
 pub use slack::SlackChannel;
@@ -1880,7 +1880,9 @@ async fn process_channel_message(
                 let message_id = parts[1].parse::<i64>().unwrap_or(0);
                 let callback_data = parts[2];
                 let chat_id = &msg.reply_target;
-                hooks.fire_callback_query(callback_data, chat_id, message_id).await;
+                hooks
+                    .fire_callback_query(callback_data, chat_id, message_id)
+                    .await;
             }
         }
         return; // Don't pass callback messages to the agent pipeline
@@ -1890,7 +1892,11 @@ async fn process_channel_message(
     if msg.content.starts_with("__silent:") {
         let real_content = msg.content["__silent:".len()..].to_string();
         let history_key = conversation_history_key(&msg);
-        append_sender_turn(ctx.as_ref(), &history_key, crate::providers::traits::ChatMessage::user(&real_content));
+        append_sender_turn(
+            ctx.as_ref(),
+            &history_key,
+            crate::providers::traits::ChatMessage::user(&real_content),
+        );
         return; // Don't trigger AI response
     }
 
@@ -3253,8 +3259,25 @@ fn build_channel_by_id(config: &Config, channel_id: &str) -> Result<Arc<dyn Chan
                 .with_workspace_dir(config.workspace_dir.clone()),
             ))
         }
-        "line" => {            let line_cfg = config                .channels_config                .line                .as_ref()                .context("LINE channel is not configured")?;            Ok(Arc::new(LineChannel::new(                line_cfg.channel_access_token.clone(),                line_cfg.channel_secret.clone(),                line_cfg.webhook_port,                line_cfg.allowed_users.clone(),                line_cfg.allowed_groups.clone(),                "小允子",                config.workspace_dir.to_string_lossy(),            )))        }
-        other => anyhow::bail!("Unknown channel '{other}'. Supported: telegram, discord, slack, line"),
+        "line" => {
+            let line_cfg = config
+                .channels_config
+                .line
+                .as_ref()
+                .context("LINE channel is not configured")?;
+            Ok(Arc::new(LineChannel::new(
+                line_cfg.channel_access_token.clone(),
+                line_cfg.channel_secret.clone(),
+                line_cfg.webhook_port,
+                line_cfg.allowed_users.clone(),
+                line_cfg.allowed_groups.clone(),
+                "小允子",
+                config.workspace_dir.to_string_lossy(),
+            )))
+        }
+        other => {
+            anyhow::bail!("Unknown channel '{other}'. Supported: telegram, discord, slack, line")
+        }
     }
 }
 

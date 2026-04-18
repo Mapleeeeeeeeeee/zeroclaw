@@ -1,16 +1,20 @@
-use std::sync::Arc;
+use crate::hooks::traits::HookHandler;
+use crate::providers::Provider;
 use async_trait::async_trait;
 use parking_lot::Mutex;
 use rusqlite::Connection;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use crate::hooks::traits::HookHandler;
-use crate::providers::Provider;
+use std::sync::Arc;
 
 pub(super) const SECTION_NAME: &str = "email_monitor";
 
-fn default_email_check_interval() -> u32 { 3 }
-fn default_email_db_path() -> String { "/home/azureuser/.email-monitor/emails.db".to_string() }
+fn default_email_check_interval() -> u32 {
+    3
+}
+fn default_email_db_path() -> String {
+    "/home/azureuser/.email-monitor/emails.db".to_string()
+}
 fn default_email_blocked_senders() -> Vec<String> {
     vec![
         "noreply-apps-scripts-notifications@google.com".to_string(),
@@ -78,7 +82,7 @@ impl EmailMonitorHook {
             CREATE TABLE IF NOT EXISTS monitor_state (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
-            );"
+            );",
         )?;
         Ok(Self {
             config,
@@ -98,7 +102,8 @@ impl EmailMonitorHook {
             "SELECT 1 FROM notified_emails WHERE message_id = ?1",
             rusqlite::params![message_id],
             |_| Ok(1i32),
-        ).is_ok()
+        )
+        .is_ok()
     }
 
     fn mark_notified(&self, message_id: &str) -> Result<(), anyhow::Error> {
@@ -123,7 +128,8 @@ impl EmailMonitorHook {
             "SELECT value FROM monitor_state WHERE key = ?1",
             rusqlite::params![key],
             |row| row.get(0),
-        ).ok()
+        )
+        .ok()
     }
 
     fn set_state(&self, key: &str, value: &str) -> Result<(), anyhow::Error> {
@@ -177,7 +183,8 @@ impl EmailMonitorHook {
             "to": group_id,
             "messages": [{"type": "text", "text": text}]
         });
-        let resp = self.http_client
+        let resp = self
+            .http_client
             .post("https://api.line.me/v2/bot/message/push")
             .header("Authorization", format!("Bearer {token}"))
             .header("Content-Type", "application/json")
@@ -194,9 +201,10 @@ impl EmailMonitorHook {
 
     fn is_blocked_sender(&self, from: &str) -> bool {
         let from_lower = from.to_lowercase();
-        self.config.blocked_senders.iter().any(|blocked| {
-            from_lower.contains(&blocked.to_lowercase())
-        })
+        self.config
+            .blocked_senders
+            .iter()
+            .any(|blocked| from_lower.contains(&blocked.to_lowercase()))
     }
 
     /// Fetch full email content via gws CLI, return plain text body (up to 3000 chars).
@@ -207,9 +215,16 @@ impl EmailMonitorHook {
             "format": "full"
         });
         let output = tokio::process::Command::new("gws")
-            .args(["gmail", "users", "messages", "get",
-                   "--params", &params.to_string(),
-                   "--format", "json"])
+            .args([
+                "gmail",
+                "users",
+                "messages",
+                "get",
+                "--params",
+                &params.to_string(),
+                "--format",
+                "json",
+            ])
             .env("GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND", "file")
             .output()
             .await;
@@ -349,7 +364,10 @@ impl EmailMonitorHook {
 
         let is_first_run = self.count_notified() == 0;
         if is_first_run {
-            tracing::info!("email_monitor: first run, caching {} messages without notifying", messages.len());
+            tracing::info!(
+                "email_monitor: first run, caching {} messages without notifying",
+                messages.len()
+            );
             for msg in &messages {
                 if let Some(id) = msg.get("id").and_then(|v| v.as_str()) {
                     let _ = self.mark_notified(id);
@@ -363,8 +381,14 @@ impl EmailMonitorHook {
                 Some(v) => v,
                 None => continue,
             };
-            let from = msg.get("from").and_then(|v| v.as_str()).unwrap_or("(unknown)");
-            let subject = msg.get("subject").and_then(|v| v.as_str()).unwrap_or("(no subject)");
+            let from = msg
+                .get("from")
+                .and_then(|v| v.as_str())
+                .unwrap_or("(unknown)");
+            let subject = msg
+                .get("subject")
+                .and_then(|v| v.as_str())
+                .unwrap_or("(no subject)");
 
             if self.is_notified(id) {
                 continue;
@@ -388,7 +412,10 @@ impl EmailMonitorHook {
                 subject = subject,
                 body = body_text,
             );
-            let summary = self.provider.chat_with_system(Some(&self.identity), &prompt, &self.model, 0.7).await
+            let summary = self
+                .provider
+                .chat_with_system(Some(&self.identity), &prompt, &self.model, 0.7)
+                .await
                 .unwrap_or_else(|_| format!("主子，{} 寄了封信來：{}", from, subject));
 
             let message = format!(
@@ -412,7 +439,8 @@ impl EmailMonitorHook {
 
     pub async fn background_tick(&self) -> Result<(), anyhow::Error> {
         let now_epoch = chrono::Utc::now().timestamp() as u64;
-        let next_check = self.get_state("next_email_check")
+        let next_check = self
+            .get_state("next_email_check")
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or(0);
 
@@ -421,7 +449,8 @@ impl EmailMonitorHook {
             let interval = self.config.check_interval_minutes as u64 * 60;
             self.set_state("next_email_check", &(now_epoch + interval).to_string())?;
 
-            let last_cleanup = self.get_state("last_cleanup")
+            let last_cleanup = self
+                .get_state("last_cleanup")
                 .and_then(|s| s.parse::<u64>().ok())
                 .unwrap_or(0);
             if now_epoch >= last_cleanup + 86400 {
@@ -435,14 +464,18 @@ impl EmailMonitorHook {
 
 #[async_trait]
 impl HookHandler for EmailMonitorHook {
-    fn name(&self) -> &str { "email_monitor" }
+    fn name(&self) -> &str {
+        "email_monitor"
+    }
 
     async fn on_gateway_start(&self, _host: &str, _port: u16) {
         if !self.config.enabled {
             return;
         }
-        tracing::info!("\u{1f4e7} EmailMonitorHook registered (interval: {}min)",
-            self.config.check_interval_minutes);
+        tracing::info!(
+            "\u{1f4e7} EmailMonitorHook registered (interval: {}min)",
+            self.config.check_interval_minutes
+        );
 
         let config = self.config.clone();
         let db = Arc::clone(&self.db);
@@ -452,7 +485,14 @@ impl HookHandler for EmailMonitorHook {
         let identity = self.identity.clone();
 
         tokio::spawn(async move {
-            let hook = EmailMonitorHook { config, db, http_client, provider, model, identity };
+            let hook = EmailMonitorHook {
+                config,
+                db,
+                http_client,
+                provider,
+                model,
+                identity,
+            };
             loop {
                 tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
                 if let Err(e) = hook.background_tick().await {
@@ -469,9 +509,14 @@ pub fn register(
     provider: &std::sync::Arc<dyn crate::providers::Provider>,
     model: &str,
 ) {
-    crate::extra_hook_lookup!(config.hooks.builtin.extra, SECTION_NAME, EmailMonitorConfig, em_config);
-    let identity = std::fs::read_to_string(config.workspace_dir.join("IDENTITY.md"))
-        .unwrap_or_default();
+    crate::extra_hook_lookup!(
+        config.hooks.builtin.extra,
+        SECTION_NAME,
+        EmailMonitorConfig,
+        em_config
+    );
+    let identity =
+        std::fs::read_to_string(config.workspace_dir.join("IDENTITY.md")).unwrap_or_default();
     match EmailMonitorHook::new(em_config, identity, Arc::clone(provider), model.to_string()) {
         Ok(hook) => {
             runner.register(Box::new(hook));

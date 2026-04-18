@@ -1,16 +1,20 @@
-use std::sync::Arc;
+use crate::hooks::traits::HookHandler;
+use crate::providers::Provider;
 use async_trait::async_trait;
 use parking_lot::Mutex;
 use rusqlite::Connection;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use crate::hooks::traits::HookHandler;
-use crate::providers::Provider;
+use std::sync::Arc;
 
 pub(super) const SECTION_NAME: &str = "news_monitor";
 
-fn default_news_check_interval() -> u32 { 5 }
-fn default_news_db_path() -> String { "/home/azureuser/.news-monitor/news.db".to_string() }
+fn default_news_check_interval() -> u32 {
+    5
+}
+fn default_news_db_path() -> String {
+    "/home/azureuser/.news-monitor/news.db".to_string()
+}
 
 /// Configuration for the news-monitor builtin hook.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -47,7 +51,13 @@ pub struct NewsMonitorHook {
 }
 
 impl NewsMonitorHook {
-    pub fn new(config: NewsMonitorConfig, workspace_dir: &std::path::Path, identity: String, provider: Arc<dyn Provider>, model: String) -> Result<Self, anyhow::Error> {
+    pub fn new(
+        config: NewsMonitorConfig,
+        workspace_dir: &std::path::Path,
+        identity: String,
+        provider: Arc<dyn Provider>,
+        model: String,
+    ) -> Result<Self, anyhow::Error> {
         if config.db_path != ":memory:" {
             if let Some(parent) = std::path::Path::new(&config.db_path).parent() {
                 if !parent.as_os_str().is_empty() {
@@ -65,7 +75,7 @@ impl NewsMonitorHook {
             CREATE TABLE IF NOT EXISTS monitor_state (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
-            );"
+            );",
         )?;
         let tg_token = super::env_loader::load_env_value(workspace_dir, "TG_BOT_TOKEN")?;
         Ok(Self {
@@ -88,7 +98,8 @@ impl NewsMonitorHook {
             "SELECT 1 FROM seen_articles WHERE url = ?1",
             rusqlite::params![url],
             |_| Ok(1i32),
-        ).is_ok()
+        )
+        .is_ok()
     }
 
     fn mark_seen(&self, url: &str, title: &str) -> Result<(), anyhow::Error> {
@@ -113,7 +124,8 @@ impl NewsMonitorHook {
             "SELECT value FROM monitor_state WHERE key = ?1",
             rusqlite::params![key],
             |row| row.get(0),
-        ).ok()
+        )
+        .ok()
     }
 
     fn set_state(&self, key: &str, value: &str) -> Result<(), anyhow::Error> {
@@ -130,7 +142,10 @@ impl NewsMonitorHook {
     }
 
     fn sanitize_html(text: &str) -> String {
-        let mut s = text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+        let mut s = text
+            .replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;");
         for tag in ["b", "code", "i"] {
             s = s.replace(&format!("&lt;{tag}&gt;"), &format!("<{tag}>"));
             s = s.replace(&format!("&lt;/{tag}&gt;"), &format!("</{tag}>"));
@@ -146,8 +161,12 @@ impl NewsMonitorHook {
             "parse_mode": "HTML",
             "disable_web_page_preview": true,
         });
-        let resp = self.http_client
-            .post(format!("https://api.telegram.org/bot{}/sendMessage", self.tg_token()))
+        let resp = self
+            .http_client
+            .post(format!(
+                "https://api.telegram.org/bot{}/sendMessage",
+                self.tg_token()
+            ))
             .json(&body)
             .send()
             .await?;
@@ -158,8 +177,12 @@ impl NewsMonitorHook {
                 "text": text,
                 "disable_web_page_preview": true,
             });
-            let _ = self.http_client
-                .post(format!("https://api.telegram.org/bot{}/sendMessage", self.tg_token()))
+            let _ = self
+                .http_client
+                .post(format!(
+                    "https://api.telegram.org/bot{}/sendMessage",
+                    self.tg_token()
+                ))
                 .json(&plain_body)
                 .send()
                 .await;
@@ -213,16 +236,19 @@ impl NewsMonitorHook {
     /// Pure — no I/O.
     fn parse_openai_rss(xml: &str) -> Vec<(String, String)> {
         let item_re = regex::Regex::new(r"(?s)<item>(.*?)</item>").unwrap();
-        let title_re = regex::Regex::new(r"<title>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</title>").unwrap();
+        let title_re =
+            regex::Regex::new(r"<title>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</title>").unwrap();
         let link_re = regex::Regex::new(r"<link>\s*(https?://[^<]+?)\s*</link>").unwrap();
 
         let mut results = vec![];
         for cap in item_re.captures_iter(xml) {
             let item = &cap[1];
-            let title = title_re.captures(item)
+            let title = title_re
+                .captures(item)
                 .map(|c| c[1].trim().to_string())
                 .unwrap_or_default();
-            let link = link_re.captures(item)
+            let link = link_re
+                .captures(item)
                 .map(|c| c[1].trim().to_string())
                 .unwrap_or_default();
             if link.is_empty() || title.is_empty() {
@@ -265,8 +291,9 @@ impl NewsMonitorHook {
     /// uppercase/underscore in slugs (e.g. `australia-MOU`).
     fn parse_anthropic_slugs(html: &str) -> Vec<String> {
         let slug_re = regex::Regex::new(
-            r#"href="(?:https?://(?:www\.)?anthropic\.com)?/news/([a-zA-Z0-9_-]+)""#
-        ).unwrap();
+            r#"href="(?:https?://(?:www\.)?anthropic\.com)?/news/([a-zA-Z0-9_-]+)""#,
+        )
+        .unwrap();
         let mut seen = std::collections::HashSet::new();
         let mut urls = vec![];
         for cap in slug_re.captures_iter(html) {
@@ -310,7 +337,11 @@ impl NewsMonitorHook {
             只用 <b> 和 <code> 標籤。\n\n\
             {article_text}"
         );
-        match self.provider.chat_with_system(Some(&self.identity), &prompt, &self.model, 0.7).await {
+        match self
+            .provider
+            .chat_with_system(Some(&self.identity), &prompt, &self.model, 0.7)
+            .await
+        {
             Ok(text) => text.trim().to_string(),
             Err(e) => {
                 tracing::warn!("news_monitor: AI summary failed for {url}: {e}");
@@ -319,7 +350,11 @@ impl NewsMonitorHook {
         }
     }
 
-    async fn process_articles(&self, source: &str, articles: Vec<(String, String)>) -> Result<(), anyhow::Error> {
+    async fn process_articles(
+        &self,
+        source: &str,
+        articles: Vec<(String, String)>,
+    ) -> Result<(), anyhow::Error> {
         for (url, title) in articles {
             if self.is_seen(&url) {
                 continue;
@@ -344,7 +379,9 @@ impl NewsMonitorHook {
     async fn check_news(&self) -> Result<(), anyhow::Error> {
         let is_first_run = self.count_seen() == 0;
         if is_first_run {
-            tracing::info!("news_monitor: first run detected, caching existing articles without notifying");
+            tracing::info!(
+                "news_monitor: first run detected, caching existing articles without notifying"
+            );
         }
 
         let openai_articles = self.fetch_openai_articles().await;
@@ -374,11 +411,11 @@ impl NewsMonitorHook {
         Ok(())
     }
 
-
     /// Skips the page title (H1 containing "Release Notes" or "|") and returns
     /// the next H1. Returns an empty string if no release heading is found.
     fn parse_dia_release_id(markdown: &str) -> String {
-        markdown.lines()
+        markdown
+            .lines()
             .filter(|l| l.starts_with("# "))
             .find(|l| !l.contains("Release Notes") && !l.contains('|'))
             .map(|l| l.trim().to_string())
@@ -388,10 +425,13 @@ impl NewsMonitorHook {
     async fn check_dia_changelog(&self) -> Result<(), anyhow::Error> {
         // Use Jina Reader to bypass Cloudflare
         let jina_url = "https://r.jina.ai/https://www.diabrowser.com/release-notes/latest";
-        let resp = match self.http_client
+        let resp = match self
+            .http_client
             .get(jina_url)
             .header("Accept", "text/plain")
-            .send().await {
+            .send()
+            .await
+        {
             Ok(r) => r,
             Err(e) => {
                 tracing::warn!("dia_monitor: fetch error: {e}");
@@ -434,15 +474,17 @@ impl NewsMonitorHook {
             content_for_llm
         );
 
-        let reply = match self.provider.chat_with_system(
-            Some(&self.identity), &prompt, &self.model, 0.3
-        ).await {
+        let reply = match self
+            .provider
+            .chat_with_system(Some(&self.identity), &prompt, &self.model, 0.3)
+            .await
+        {
             Ok(r) => r.trim().to_string(),
-            Err(e) => {{
+            Err(e) => {
                 tracing::warn!("dia_monitor: LLM error: {{e}}");
                 self.set_state("dia_last_release_id", &release_id)?;
                 return Ok(());
-            }}
+            }
         };
 
         // Update DB
@@ -468,7 +510,8 @@ impl NewsMonitorHook {
 
     pub async fn background_tick(&self) -> Result<(), anyhow::Error> {
         let now_epoch = chrono::Utc::now().timestamp() as u64;
-        let next_check = self.get_state("next_news_check")
+        let next_check = self
+            .get_state("next_news_check")
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or(0);
 
@@ -483,14 +526,18 @@ impl NewsMonitorHook {
 
 #[async_trait]
 impl HookHandler for NewsMonitorHook {
-    fn name(&self) -> &str { "news_monitor" }
+    fn name(&self) -> &str {
+        "news_monitor"
+    }
 
     async fn on_gateway_start(&self, _host: &str, _port: u16) {
         if !self.config.enabled {
             return;
         }
-        tracing::info!("📰 NewsMonitorHook registered (interval: {}min)",
-            self.config.check_interval_minutes);
+        tracing::info!(
+            "📰 NewsMonitorHook registered (interval: {}min)",
+            self.config.check_interval_minutes
+        );
 
         let config = self.config.clone();
         let db = Arc::clone(&self.db);
@@ -501,7 +548,15 @@ impl HookHandler for NewsMonitorHook {
         let tg_token = self.tg_token.clone();
 
         tokio::spawn(async move {
-            let hook = NewsMonitorHook { config, db, http_client, provider, model, identity, tg_token };
+            let hook = NewsMonitorHook {
+                config,
+                db,
+                http_client,
+                provider,
+                model,
+                identity,
+                tg_token,
+            };
             loop {
                 tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
                 if let Err(e) = hook.background_tick().await {
@@ -518,10 +573,21 @@ pub fn register(
     provider: &std::sync::Arc<dyn crate::providers::Provider>,
     model: &str,
 ) {
-    crate::extra_hook_lookup!(config.hooks.builtin.extra, SECTION_NAME, NewsMonitorConfig, nm_config);
-    let identity = std::fs::read_to_string(config.workspace_dir.join("IDENTITY.md"))
-        .unwrap_or_default();
-    match NewsMonitorHook::new(nm_config, &config.workspace_dir, identity, Arc::clone(provider), model.to_string()) {
+    crate::extra_hook_lookup!(
+        config.hooks.builtin.extra,
+        SECTION_NAME,
+        NewsMonitorConfig,
+        nm_config
+    );
+    let identity =
+        std::fs::read_to_string(config.workspace_dir.join("IDENTITY.md")).unwrap_or_default();
+    match NewsMonitorHook::new(
+        nm_config,
+        &config.workspace_dir,
+        identity,
+        Arc::clone(provider),
+        model.to_string(),
+    ) {
         Ok(hook) => {
             runner.register(Box::new(hook));
             tracing::info!("News monitor hook registered");
@@ -543,7 +609,8 @@ mod tests {
         let results = NewsMonitorHook::parse_openai_rss(OPENAI_RSS_FIXTURE);
         // Fixture has 20 items: 19 /academy/ pages + 1 /index/ real news.
         assert_eq!(
-            results.len(), 1,
+            results.len(),
+            1,
             "expected 1 non-academy item from fixture, got {}: {results:#?}",
             results.len()
         );
@@ -621,7 +688,12 @@ some content\n\
         let urls = NewsMonitorHook::parse_anthropic_slugs(ANTHROPIC_FIXTURE);
 
         // Baseline: should find exactly the 14 unique articles currently on the news index.
-        assert_eq!(urls.len(), 14, "expected 14 unique articles, got {}: {urls:#?}", urls.len());
+        assert_eq!(
+            urls.len(),
+            14,
+            "expected 14 unique articles, got {}: {urls:#?}",
+            urls.len()
+        );
 
         // Regression guard #1: slug with uppercase letters must be captured in full.
         // Previously [a-z0-9-]+ truncated "australia-MOU" to "australia-" → 404.
@@ -649,7 +721,10 @@ some content\n\
 
         // Shape invariant: all URLs must be well-formed (no trailing quotes or spaces from over-matching regex).
         assert!(
-            urls.iter().all(|u| u.starts_with("https://www.anthropic.com/news/") && !u.contains('"') && !u.contains(' ')),
+            urls.iter()
+                .all(|u| u.starts_with("https://www.anthropic.com/news/")
+                    && !u.contains('"')
+                    && !u.contains(' ')),
             "all URLs must be well-formed anthropic news URLs, got: {urls:?}"
         );
 
@@ -657,7 +732,10 @@ some content\n\
         assert!(
             urls.iter().all(|u| {
                 u.strip_prefix("https://www.anthropic.com/news/")
-                    .map(|slug| slug.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'))
+                    .map(|slug| {
+                        slug.chars()
+                            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+                    })
                     .unwrap_or(false)
             }),
             "all slugs must be alphanumeric + dash/underscore only"

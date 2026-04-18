@@ -2530,7 +2530,8 @@ impl Channel for TelegramChannel {
             return Ok(());
         }
 
-        self.send_text_chunks(&content, chat_id, thread_id, None).await
+        self.send_text_chunks(&content, chat_id, thread_id, None)
+            .await
     }
 
     async fn listen(&self, tx: tokio::sync::mpsc::Sender<ChannelMessage>) -> anyhow::Result<()> {
@@ -2688,10 +2689,12 @@ Ensure only one `zeroclaw` process is using this bot token."
 
                     // Handle callback_query (inline button presses)
                     if let Some(callback_query) = update.get("callback_query") {
-                        let callback_data = callback_query.get("data")
+                        let callback_data = callback_query
+                            .get("data")
                             .and_then(|d| d.as_str())
                             .unwrap_or("");
-                        let callback_query_id = callback_query.get("id")
+                        let callback_query_id = callback_query
+                            .get("id")
                             .and_then(|d| d.as_str())
                             .unwrap_or("");
                         let chat_id = callback_query
@@ -2705,9 +2708,14 @@ Ensure only one `zeroclaw` process is using this bot token."
                             .unwrap_or(0);
 
                         // Answer callback query immediately to dismiss spinner
-                        let answer_body = serde_json::json!({ "callback_query_id": callback_query_id });
-                        let _ = self.http_client().post(self.api_url("answerCallbackQuery"))
-                            .json(&answer_body).send().await;
+                        let answer_body =
+                            serde_json::json!({ "callback_query_id": callback_query_id });
+                        let _ = self
+                            .http_client()
+                            .post(self.api_url("answerCallbackQuery"))
+                            .json(&answer_body)
+                            .send()
+                            .await;
 
                         // Route as a special ChannelMessage with __callback: prefix
                         if !callback_data.is_empty() && !chat_id.is_empty() {
