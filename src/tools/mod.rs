@@ -65,12 +65,14 @@ pub mod pdf_read;
 pub mod project_intel;
 pub mod proxy_config;
 pub mod pushover;
+pub mod release_monitor_repos;
 pub mod report_templates;
 pub mod schedule;
 pub mod schema;
 pub mod screenshot;
 pub mod security_ops;
 pub mod shell;
+pub mod surfer_accounts;
 pub mod swarm;
 pub mod tool_search;
 pub mod traits;
@@ -126,12 +128,16 @@ pub use pdf_read::PdfReadTool;
 pub use project_intel::ProjectIntelTool;
 pub use proxy_config::ProxyConfigTool;
 pub use pushover::PushoverTool;
+pub use release_monitor_repos::{
+    ReleaseMonitorAddRepoTool, ReleaseMonitorListReposTool, ReleaseMonitorRemoveRepoTool,
+};
 pub use schedule::ScheduleTool;
 #[allow(unused_imports)]
 pub use schema::{CleaningStrategy, SchemaCleanr};
 pub use screenshot::ScreenshotTool;
 pub use security_ops::SecurityOpsTool;
 pub use shell::ShellTool;
+pub use surfer_accounts::{SurferAddAccountTool, SurferListAccountsTool, SurferRemoveAccountTool};
 pub use swarm::SwarmTool;
 pub use tool_search::ToolSearchTool;
 pub use traits::Tool;
@@ -148,6 +154,7 @@ use crate::security::SecurityPolicy;
 use async_trait::async_trait;
 use parking_lot::RwLock;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 /// Shared handle to the delegate tool's parent-tools list.
@@ -473,6 +480,31 @@ pub fn all_tools_with_runtime(
             root_config.linkedin.content.clone(),
             root_config.linkedin.image.clone(),
         )));
+    }
+
+    // Surfer account list management tools
+    if root_config.surfer_accounts.enabled {
+        let twitter =
+            PathBuf::from(shellexpand::tilde(&root_config.surfer_accounts.twitter_file).as_ref());
+        let reddit =
+            PathBuf::from(shellexpand::tilde(&root_config.surfer_accounts.reddit_file).as_ref());
+        tool_arcs.push(Arc::new(SurferListAccountsTool::new(
+            twitter.clone(),
+            reddit.clone(),
+        )));
+        tool_arcs.push(Arc::new(SurferAddAccountTool::new(
+            twitter.clone(),
+            reddit.clone(),
+        )));
+        tool_arcs.push(Arc::new(SurferRemoveAccountTool::new(twitter, reddit)));
+    }
+
+    // Release-monitor repo list management tools (config.toml-backed, daemon restart)
+    {
+        let cfg_path = root_config.config_path.clone();
+        tool_arcs.push(Arc::new(ReleaseMonitorListReposTool::new(cfg_path.clone())));
+        tool_arcs.push(Arc::new(ReleaseMonitorAddRepoTool::new(cfg_path.clone())));
+        tool_arcs.push(Arc::new(ReleaseMonitorRemoveRepoTool::new(cfg_path)));
     }
 
     if let Some(key) = composio_key {

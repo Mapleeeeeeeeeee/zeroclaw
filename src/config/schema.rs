@@ -339,6 +339,10 @@ pub struct Config {
     /// Plugin system configuration (`[plugins]`).
     #[serde(default)]
     pub plugins: PluginsConfig,
+
+    /// Twitter/Reddit surfer account list management configuration (`[surfer_accounts]`).
+    #[serde(default)]
+    pub surfer_accounts: SurferAccountsConfig,
 }
 
 /// Multi-client workspace isolation configuration.
@@ -2393,6 +2397,45 @@ impl Default for PluginsConfig {
             plugins_dir: default_plugins_dir(),
             auto_discover: false,
             max_plugins: default_max_plugins(),
+        }
+    }
+}
+
+/// Twitter/Reddit surfer account list management configuration (`[surfer_accounts]`).
+///
+/// Controls the three built-in tools that read and modify the plain-text account files
+/// consumed by the external `surfer-cron.sh` script.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct SurferAccountsConfig {
+    /// Enable the surfer account management tools. Default: true.
+    #[serde(default = "default_surfer_accounts_enabled")]
+    pub enabled: bool,
+    /// Path to the Twitter accounts file. Supports `~/` home expansion. Default: `~/reddit-surfer/accounts.txt`.
+    #[serde(default = "default_surfer_twitter_file")]
+    pub twitter_file: String,
+    /// Path to the Reddit subreddits file. Supports `~/` home expansion. Default: `~/reddit-surfer/reddit-subs.txt`.
+    #[serde(default = "default_surfer_reddit_file")]
+    pub reddit_file: String,
+}
+
+fn default_surfer_accounts_enabled() -> bool {
+    true
+}
+
+fn default_surfer_twitter_file() -> String {
+    "~/reddit-surfer/accounts.txt".to_string()
+}
+
+fn default_surfer_reddit_file() -> String {
+    "~/reddit-surfer/reddit-subs.txt".to_string()
+}
+
+impl Default for SurferAccountsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_surfer_accounts_enabled(),
+            twitter_file: default_surfer_twitter_file(),
+            reddit_file: default_surfer_reddit_file(),
         }
     }
 }
@@ -5522,11 +5565,17 @@ pub struct LineConfig {
     pub allowed_groups: Vec<String>,
 }
 
-fn default_line_webhook_port() -> u16 { 8443 }
+fn default_line_webhook_port() -> u16 {
+    8443
+}
 
 impl ChannelConfig for LineConfig {
-    fn name() -> &'static str { "LINE" }
-    fn desc() -> &'static str { "LINE Messaging API" }
+    fn name() -> &'static str {
+        "LINE"
+    }
+    fn desc() -> &'static str {
+        "LINE Messaging API"
+    }
 }
 
 impl ChannelConfig for QQConfig {
@@ -6028,6 +6077,7 @@ impl Default for Config {
             knowledge: KnowledgeConfig::default(),
             linkedin: LinkedInConfig::default(),
             plugins: PluginsConfig::default(),
+            surfer_accounts: SurferAccountsConfig::default(),
         }
     }
 }
@@ -8465,6 +8515,7 @@ default_temperature = 0.7
             knowledge: KnowledgeConfig::default(),
             linkedin: LinkedInConfig::default(),
             plugins: PluginsConfig::default(),
+            surfer_accounts: SurferAccountsConfig::default(),
         };
 
         let toml_str = toml::to_string_pretty(&config).unwrap();
@@ -8798,6 +8849,7 @@ tool_dispatcher = "xml"
             knowledge: KnowledgeConfig::default(),
             linkedin: LinkedInConfig::default(),
             plugins: PluginsConfig::default(),
+            surfer_accounts: SurferAccountsConfig::default(),
         };
 
         config.save().await.unwrap();
@@ -11851,5 +11903,4 @@ require_otp_to_resume = true
             "Debug output must show [REDACTED] for client_secret"
         );
     }
-
 }
