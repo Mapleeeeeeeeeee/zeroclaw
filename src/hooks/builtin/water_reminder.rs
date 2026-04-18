@@ -11,6 +11,23 @@ use serde::{Deserialize, Serialize};
 use crate::hooks::traits::HookHandler;
 use crate::providers::Provider;
 
+/// Abstracts "current wall-clock time" so tests can drive time deterministically.
+///
+/// Production uses `SystemClock` (real UTC `now`). Tests use `FakeClock` to
+/// set/advance time and verify schedule-dependent behavior (e.g., daily report
+/// only fires within the 5-minute window after `work_end`).
+pub(crate) trait Clock: Send + Sync {
+    fn now_utc(&self) -> chrono::DateTime<chrono::Utc>;
+}
+
+pub(crate) struct SystemClock;
+
+impl Clock for SystemClock {
+    fn now_utc(&self) -> chrono::DateTime<chrono::Utc> {
+        chrono::Utc::now()
+    }
+}
+
 pub(super) const SECTION_NAME: &str = "water_reminder";
 
 fn default_water_daily_goal() -> i32 {
@@ -26,16 +43,16 @@ fn default_water_max_sips() -> u32 {
     8
 }
 fn default_water_work_start() -> String {
-    "01:30".to_string()
+    "09:30".to_string()
 }
 fn default_water_work_end() -> String {
-    "10:30".to_string()
+    "18:30".to_string()
 }
 fn default_water_lunch_start() -> String {
-    "04:30".to_string()
+    "12:30".to_string()
 }
 fn default_water_lunch_end() -> String {
-    "05:30".to_string()
+    "13:30".to_string()
 }
 fn default_water_interval_min() -> u32 {
     20
@@ -77,16 +94,16 @@ pub struct WaterReminderConfig {
     /// Maximum sips per reminder. Default: `8`.
     #[serde(default = "default_water_max_sips")]
     pub max_sips: u32,
-    /// Work start time (HH:MM, UTC). Default: `"01:30"`.
+    /// Work start time (HH:MM, Taipei/CST). Default: `"09:30"`.
     #[serde(default = "default_water_work_start")]
     pub work_start: String,
-    /// Work end time (HH:MM, UTC). Default: `"10:30"`.
+    /// Work end time (HH:MM, Taipei/CST). Default: `"18:30"`.
     #[serde(default = "default_water_work_end")]
     pub work_end: String,
-    /// Lunch window start (HH:MM, UTC). Default: `"04:30"`.
+    /// Lunch window start (HH:MM, Taipei/CST). Default: `"12:30"`.
     #[serde(default = "default_water_lunch_start")]
     pub lunch_start: String,
-    /// Lunch window end (HH:MM, UTC). Default: `"05:30"`.
+    /// Lunch window end (HH:MM, Taipei/CST). Default: `"13:30"`.
     #[serde(default = "default_water_lunch_end")]
     pub lunch_end: String,
     /// Minimum interval between reminders (minutes). Default: `20`.
@@ -142,6 +159,26 @@ impl WaterReminderConfig {
     pub fn parse_lunch_end(&self) -> Option<NaiveTime> {
         NaiveTime::parse_from_str(&self.lunch_end, "%H:%M").ok()
     }
+    /// Returns the midpoint time of the lunch window, defaulting to 13:00 if parsing fails.
+    pub fn lunch_midpoint(&self) -> chrono::NaiveTime {
+        const DEFAULT: u32 = 13 * 3600;
+        let Some(start) = self.parse_lunch_start() else {
+            return chrono::NaiveTime::from_num_seconds_from_midnight_opt(DEFAULT, 0)
+                .expect("13:00 is a valid time");
+        };
+        let Some(end) = self.parse_lunch_end() else {
+            return chrono::NaiveTime::from_num_seconds_from_midnight_opt(DEFAULT, 0)
+                .expect("13:00 is a valid time");
+        };
+        let midnight = chrono::NaiveTime::from_hms_opt(0, 0, 0).expect("00:00 valid");
+        let start_secs = start.signed_duration_since(midnight).num_seconds();
+        let end_secs = end.signed_duration_since(midnight).num_seconds();
+        let mid_secs = u32::try_from(i64::midpoint(start_secs, end_secs)).unwrap_or(DEFAULT);
+        chrono::NaiveTime::from_num_seconds_from_midnight_opt(mid_secs, 0).unwrap_or_else(|| {
+            chrono::NaiveTime::from_num_seconds_from_midnight_opt(DEFAULT, 0)
+                .expect("13:00 is a valid time")
+        })
+    }
     pub fn total_drinks_goal(&self) -> i32 {
         if self.per_drink_ml <= 0 {
             return 0;
@@ -186,11 +223,11 @@ pub enum TimeContext {
 
 impl TimeContext {
     pub fn from_time(t: &NaiveTime) -> Self {
-        let t9_30 = NaiveTime::from_hms_opt(1, 30, 0).unwrap(); // 09:30 CST
-        let t11_00 = NaiveTime::from_hms_opt(3, 0, 0).unwrap(); // 11:00 CST
-        let t14_00 = NaiveTime::from_hms_opt(6, 0, 0).unwrap(); // 14:00 CST
-        let t17_00 = NaiveTime::from_hms_opt(9, 0, 0).unwrap(); // 17:00 CST
-        let t18_30 = NaiveTime::from_hms_opt(10, 30, 0).unwrap(); // 18:30 CST
+        let t9_30 = NaiveTime::from_hms_opt(9, 30, 0).unwrap();
+        let t11_00 = NaiveTime::from_hms_opt(11, 0, 0).unwrap();
+        let t14_00 = NaiveTime::from_hms_opt(14, 0, 0).unwrap();
+        let t17_00 = NaiveTime::from_hms_opt(17, 0, 0).unwrap();
+        let t18_30 = NaiveTime::from_hms_opt(18, 30, 0).unwrap();
         if *t >= t9_30 && *t < t11_00 {
             TimeContext::MorningStart
         } else if *t >= t11_00 && *t < t14_00 {
@@ -230,15 +267,17 @@ pub struct WaterReminderHook {
     pub model: String,
     pub identity: String,
     tg_token: String,
+    clock: Arc<dyn Clock>,
 }
 
 impl WaterReminderHook {
-    pub fn new(
+    pub(crate) fn new(
         config: WaterReminderConfig,
         workspace_dir: &std::path::Path,
         identity: String,
         provider: Arc<dyn Provider>,
         model: String,
+        clock: Arc<dyn Clock>,
     ) -> Result<Self, WaterReminderError> {
         if config.db_path != ":memory:" {
             if let Some(parent) = std::path::Path::new(&config.db_path).parent() {
@@ -271,6 +310,7 @@ impl WaterReminderHook {
             model,
             identity,
             tg_token,
+            clock,
         })
     }
 
@@ -384,6 +424,7 @@ impl WaterReminderHook {
     }
 
     const LEAVE_DATE_KEY: &'static str = "leave_date";
+    const DEFAULT_LUNCH_MIDPOINT_SECS: u32 = 13 * 3600;
 
     /// Call provider directly to generate AI text. Returns fallback on failure.
     pub async fn call_ai(&self, prompt: &str) -> String {
@@ -408,7 +449,7 @@ impl WaterReminderHook {
     }
 
     fn is_after_work_end(&self) -> bool {
-        let now_time = chrono::Local::now().time();
+        let now_time = self.now_taipei().time();
         match self.config.parse_work_end() {
             Some(end) => now_time >= end,
             None => false,
@@ -435,10 +476,7 @@ impl WaterReminderHook {
     }
 
     async fn handle_leave_command(&self) -> String {
-        let today = chrono::Utc::now()
-            .with_timezone(&chrono_tz::Asia::Taipei)
-            .format("%Y-%m-%d")
-            .to_string();
+        let today = self.now_taipei().format("%Y-%m-%d").to_string();
         let state = self.get_state(&today).ok();
         let progress = match &state {
             Some(s) => format!(
@@ -460,7 +498,7 @@ impl WaterReminderHook {
             return self.call_ai(&prompt).await;
         }
         match self.set_scheduler_value(Self::LEAVE_DATE_KEY, &today) {
-            Ok(_) => {
+            Ok(()) => {
                 tracing::info!("🚰 Leave set for {today}");
                 let ai_reply = self.call_ai("你是小允子。主子今天請假了。用甄嬛傳風格回覆確認請假，告知今日不再打擾、明早九點半恢復，30字以內，帶emoji。只輸出回覆的話。").await;
                 format!("{}\n\n📊 {}", ai_reply, progress)
@@ -473,10 +511,7 @@ impl WaterReminderHook {
     }
 
     async fn handle_unleave_command(&self) -> String {
-        let today = chrono::Utc::now()
-            .with_timezone(&chrono_tz::Asia::Taipei)
-            .format("%Y-%m-%d")
-            .to_string();
+        let today = self.now_taipei().format("%Y-%m-%d").to_string();
         let state = self.get_state(&today).ok();
         let progress = match &state {
             Some(s) => format!(
@@ -494,7 +529,7 @@ impl WaterReminderHook {
             return self.call_ai(&prompt).await;
         }
         match self.clear_pending(Self::LEAVE_DATE_KEY) {
-            Ok(_) => {
+            Ok(()) => {
                 tracing::info!("🚰 Leave cleared");
                 let ai_reply = self.call_ai("你是小允子。主子銷假回來了。用甄嬛傳風格歡迎主子回來並表示馬上備水，30字以內，帶emoji。只輸出回覆的話。").await;
                 format!("{}\n\n📊 {}", ai_reply, progress)
@@ -525,7 +560,7 @@ impl WaterReminderHook {
 
     /// Send a water reminder with inline keyboard
     pub async fn send_reminder(&self, is_snooze: bool) -> Result<(), WaterReminderError> {
-        let now = chrono::Utc::now().with_timezone(&chrono_tz::Asia::Taipei);
+        let now = self.now_taipei();
         let date = now.format("%Y-%m-%d").to_string();
         let state = self.get_state(&date)?;
 
@@ -545,7 +580,7 @@ impl WaterReminderHook {
             rng.random_range(self.config.min_sips..=self.config.max_sips)
         };
 
-        let prompt = build_ai_prompt(&state, is_snooze, sips);
+        let prompt = build_ai_prompt(&state, is_snooze, sips, &now.time());
         let ai_text = self.call_ai(&prompt).await;
 
         let keyboard = serde_json::json!({
@@ -576,7 +611,7 @@ impl WaterReminderHook {
         if let Ok(data) = resp.json::<serde_json::Value>().await {
             if let Some(msg_id) = data.pointer("/result/message_id").and_then(|v| v.as_i64()) {
                 self.set_scheduler_value("pending_message_id", &msg_id.to_string())?;
-                let sent_at = chrono::Utc::now().timestamp();
+                let sent_at = self.clock.now_utc().timestamp();
                 self.set_scheduler_value("pending_sent_at", &sent_at.to_string())?;
                 self.set_scheduler_value("snooze_sent", if is_snooze { "true" } else { "false" })?;
                 if !is_snooze {
@@ -595,7 +630,7 @@ impl WaterReminderHook {
         message_id: i64,
         sips: i32,
     ) -> Result<(), WaterReminderError> {
-        let now = chrono::Utc::now().with_timezone(&chrono_tz::Asia::Taipei);
+        let now = self.now_taipei();
         let date = now.format("%Y-%m-%d").to_string();
         let state = self.get_state(&date)?;
         let bar = build_progress_bar(state.drink_count, state.total_drinks_goal());
@@ -628,7 +663,7 @@ impl WaterReminderHook {
 
     /// Send daily report at 18:30
     pub async fn send_daily_report(&self) -> Result<(), WaterReminderError> {
-        let now_taipei = chrono::Utc::now().with_timezone(&chrono_tz::Asia::Taipei);
+        let now_taipei = self.now_taipei();
         let date = now_taipei.format("%Y-%m-%d").to_string();
 
         if self.should_skip_as_non_workday() {
@@ -641,6 +676,10 @@ impl WaterReminderHook {
 
         let prompt = build_ai_report_prompt(&state, goal_reached);
         let ai_text = self.call_ai(&prompt).await;
+        tracing::debug!(
+            "🚰 daily report AI text length: {} chars",
+            ai_text.chars().count()
+        );
 
         let bar = build_progress_bar(state.drink_count, state.total_drinks_goal());
         let streak_text = if state.current_streak > 0 {
@@ -661,7 +700,7 @@ impl WaterReminderHook {
             "text": text,
         });
 
-        let _ = self
+        match self
             .http_client
             .post(format!(
                 "https://api.telegram.org/bot{}/sendMessage",
@@ -669,9 +708,35 @@ impl WaterReminderHook {
             ))
             .json(&body)
             .send()
-            .await;
+            .await
+        {
+            Err(e) => {
+                tracing::error!("🚰 daily report TG send failed: network error: {e}");
+            }
+            Ok(response) => {
+                let status = response.status();
+                if status.is_success() {
+                    tracing::info!(
+                        "🚰 daily report sent to TG (chat_id={}, goal_reached={}, status={})",
+                        self.config.chat_id,
+                        goal_reached,
+                        status
+                    );
+                    self.set_scheduler_value("report_sent_today", &date)?;
+                } else {
+                    let body_text = response
+                        .text()
+                        .await
+                        .unwrap_or_else(|e| format!("<failed to read body: {e}>"));
+                    tracing::error!(
+                        "🚰 daily report TG send non-2xx: status={}, body={}",
+                        status,
+                        body_text
+                    );
+                }
+            }
+        }
 
-        self.set_scheduler_value("report_sent_today", &date)?;
         Ok(())
     }
 
@@ -681,7 +746,7 @@ impl WaterReminderHook {
     /// 3. Daily report at 18:30
     /// 4. Lunch reminder (~13:00)
     pub async fn background_tick(&self) -> Result<(), WaterReminderError> {
-        let now_taipei = chrono::Utc::now().with_timezone(&chrono_tz::Asia::Taipei);
+        let now_taipei = self.now_taipei();
         let now_time = now_taipei.time();
         let date_str = now_taipei.format("%Y-%m-%d").to_string();
 
@@ -698,11 +763,13 @@ impl WaterReminderHook {
         // Skip outside work hours (except for 18:30 report)
         let in_work_hours = is_work_time(&now_time, &self.config.work_start, &self.config.work_end);
 
-        // --- Daily report at 18:30 ---
-        let report_time = chrono::NaiveTime::from_hms_opt(10, 30, 0).unwrap(); // 18:30 CST
-        if now_time >= report_time && now_time < chrono::NaiveTime::from_hms_opt(10, 35, 0).unwrap()
-        {
-            // 18:35 CST
+        // --- Daily report at work_end ---
+        let report_time = self
+            .config
+            .parse_work_end()
+            .unwrap_or_else(|| chrono::NaiveTime::from_hms_opt(18, 30, 0).unwrap());
+        let report_end = report_time + chrono::Duration::minutes(5);
+        if now_time >= report_time && now_time < report_end {
             let report_sent = self
                 .get_scheduler_value("report_sent_today")?
                 .unwrap_or_default();
@@ -718,7 +785,7 @@ impl WaterReminderHook {
         // --- Snooze check ---
         if let Some(pending_sent_at) = self.get_scheduler_value("pending_sent_at")? {
             let sent_epoch: i64 = pending_sent_at.parse().unwrap_or(0);
-            let elapsed = chrono::Utc::now().timestamp() - sent_epoch;
+            let elapsed = self.clock.now_utc().timestamp() - sent_epoch;
             let snooze_sent = self.get_scheduler_value("snooze_sent")?.unwrap_or_default();
 
             if elapsed >= self.config.snooze_wait_seconds as i64 {
@@ -742,16 +809,16 @@ impl WaterReminderHook {
                         self.config.interval_min_minutes,
                         self.config.interval_max_minutes,
                     );
-                    let next = chrono::Utc::now().timestamp() as u64 + interval as u64;
+                    let next = self.now_epoch() + u64::from(interval);
                     self.schedule_next(next)?;
                 }
             }
             return Ok(()); // Don't send new reminder while pending
         }
 
-        // --- Lunch window: send one reminder around 13:00 ---
+        // --- Lunch window: send one reminder around midpoint ---
         if is_lunch_window(&now_time, &self.config.lunch_start, &self.config.lunch_end) {
-            let lunch_midpoint = chrono::NaiveTime::from_hms_opt(5, 0, 0).unwrap(); // 13:00 CST
+            let lunch_midpoint = self.config.lunch_midpoint();
             let lunch_sent = self
                 .get_scheduler_value("lunch_sent_today")?
                 .unwrap_or_default();
@@ -759,11 +826,11 @@ impl WaterReminderHook {
                 self.send_reminder(false).await?;
                 self.set_scheduler_value("lunch_sent_today", &date_str)?;
                 // Schedule next after lunch
-                let next = chrono::Utc::now().timestamp() as u64
-                    + next_interval_seconds(
+                let next = self.now_epoch()
+                    + u64::from(next_interval_seconds(
                         self.config.interval_min_minutes,
                         self.config.interval_max_minutes,
-                    ) as u64;
+                    ));
                 self.schedule_next(next)?;
             }
             return Ok(()); // During lunch, only the midpoint reminder
@@ -793,7 +860,7 @@ impl WaterReminderHook {
                 let mut rng = rand::rng();
                 rng.random_range(5u32..=10u32) * 60
             };
-            let next = chrono::Utc::now().timestamp() as u64 + delay as u64;
+            let next = self.now_epoch() + u64::from(delay);
             self.schedule_next(next)?;
             tracing::info!("🚰 First drinking reminder scheduled in {} seconds", delay);
             return Ok(());
@@ -801,7 +868,7 @@ impl WaterReminderHook {
 
         // --- Normal reminder check ---
         let next_reminder = self.get_scheduler_value("next_reminder")?;
-        let now_epoch = chrono::Utc::now().timestamp() as u64;
+        let now_epoch = self.now_epoch();
 
         match next_reminder {
             Some(next_str) => {
@@ -813,7 +880,7 @@ impl WaterReminderHook {
                         self.config.interval_min_minutes,
                         self.config.interval_max_minutes,
                     );
-                    self.schedule_next(now_epoch + interval as u64)?;
+                    self.schedule_next(now_epoch + u64::from(interval))?;
                 }
             }
             None => {
@@ -822,7 +889,7 @@ impl WaterReminderHook {
                     self.config.interval_min_minutes,
                     self.config.interval_max_minutes,
                 );
-                self.schedule_next(now_epoch + interval as u64)?;
+                self.schedule_next(now_epoch + u64::from(interval))?;
                 tracing::info!("🚰 Scheduled first reminder in {} seconds", interval);
             }
         }
@@ -864,6 +931,14 @@ impl WaterReminderHook {
     fn tg_token(&self) -> &str {
         &self.tg_token
     }
+
+    fn now_taipei(&self) -> chrono::DateTime<chrono_tz::Tz> {
+        self.clock.now_utc().with_timezone(&chrono_tz::Asia::Taipei)
+    }
+
+    fn now_epoch(&self) -> u64 {
+        self.clock.now_utc().timestamp().max(0) as u64
+    }
 }
 
 #[async_trait]
@@ -891,6 +966,7 @@ impl HookHandler for WaterReminderHook {
         let model = self.model.clone();
         let identity = self.identity.clone();
         let tg_token = self.tg_token.clone();
+        let clock = Arc::clone(&self.clock);
 
         tokio::spawn(async move {
             let hook = WaterReminderHook {
@@ -901,6 +977,7 @@ impl HookHandler for WaterReminderHook {
                 model,
                 identity,
                 tg_token,
+                clock,
             };
             loop {
                 tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
@@ -938,7 +1015,7 @@ impl HookHandler for WaterReminderHook {
             }
 
             // Record sips (user pressed the button)
-            let now = chrono::Utc::now().with_timezone(&chrono_tz::Asia::Taipei);
+            let now = self.now_taipei();
             let date = now.format("%Y-%m-%d").to_string();
 
             match self.record_drink(&date, sips) {
@@ -1081,10 +1158,15 @@ pub fn build_progress_bar(drinks: i32, total_drinks: i32) -> String {
     format!("{}{}", f, e)
 }
 
-pub fn build_ai_prompt(state: &ReminderState, is_snooze: bool, sips: u32) -> String {
+pub fn build_ai_prompt(
+    state: &ReminderState,
+    is_snooze: bool,
+    sips: u32,
+    now_time: &NaiveTime,
+) -> String {
     let total = state.total_drinks_goal();
     let bar = build_progress_bar(state.drink_count, total);
-    let ctx = TimeContext::from_time(&chrono::Local::now().time());
+    let ctx = TimeContext::from_time(now_time);
     let snooze_note = if is_snooze {
         "（這是一次提醒後 snooze 的再次提醒）"
     } else {
@@ -1144,6 +1226,7 @@ pub fn register(
         identity,
         Arc::clone(provider),
         model.to_string(),
+        Arc::new(SystemClock),
     ) {
         Ok(hook) => {
             runner.register(Box::new(hook));
@@ -1158,6 +1241,32 @@ mod tests {
     use super::*;
     use chrono::NaiveDate;
     use std::sync::Arc;
+
+    struct FakeClock {
+        now: std::sync::Mutex<chrono::DateTime<chrono::Utc>>,
+    }
+
+    impl FakeClock {
+        fn new(now: chrono::DateTime<chrono::Utc>) -> Self {
+            Self {
+                now: std::sync::Mutex::new(now),
+            }
+        }
+    }
+
+    impl super::Clock for FakeClock {
+        fn now_utc(&self) -> chrono::DateTime<chrono::Utc> {
+            *self.now.lock().unwrap()
+        }
+    }
+
+    fn fake_clock_taipei(h: u32, m: u32) -> Arc<FakeClock> {
+        use chrono::TimeZone;
+        let taipei_dt = chrono_tz::Asia::Taipei
+            .with_ymd_and_hms(2026, 4, 16, h, m, 0)
+            .unwrap();
+        Arc::new(FakeClock::new(taipei_dt.with_timezone(&chrono::Utc)))
+    }
 
     fn t(h: u32, m: u32) -> NaiveTime {
         NaiveTime::from_hms_opt(h, m, 0).unwrap()
@@ -1179,7 +1288,7 @@ mod tests {
         }
     }
 
-    fn hook() -> WaterReminderHook {
+    fn hook_with_clock(clock: Arc<dyn super::Clock>) -> WaterReminderHook {
         // Each invocation gets its own subdirectory so parallel tests don't race on .env.
         let tmp = std::env::temp_dir().join(format!(
             "zeroclaw_test_{}_{:?}",
@@ -1197,10 +1306,10 @@ mod tests {
                 per_drink_ml: 30,
                 min_sips: 5,
                 max_sips: 8,
-                work_start: "01:30".to_string(),
-                work_end: "10:30".to_string(),
-                lunch_start: "04:30".to_string(),
-                lunch_end: "05:30".to_string(),
+                work_start: "09:30".to_string(),
+                work_end: "18:30".to_string(),
+                lunch_start: "12:30".to_string(),
+                lunch_end: "13:30".to_string(),
                 interval_min_minutes: 30,
                 interval_max_minutes: 50,
                 snooze_wait_seconds: 180,
@@ -1211,8 +1320,13 @@ mod tests {
             String::new(),
             Arc::new(TestProvider),
             "test-model".to_string(),
+            clock,
         )
         .unwrap()
+    }
+
+    fn hook() -> WaterReminderHook {
+        hook_with_clock(fake_clock_taipei(14, 0)) // 下午 2 點，安全的工作時段
     }
     fn st(dc: i32) -> ReminderState {
         ReminderState {
@@ -1227,43 +1341,43 @@ mod tests {
 
     #[test]
     fn work_time_inside() {
-        assert!(is_work_time(&t(2, 0), "01:30", "10:30"));
+        assert!(is_work_time(&t(14, 0), "09:30", "18:30"));
     }
     #[test]
     fn work_time_start_incl() {
-        assert!(is_work_time(&t(1, 30), "01:30", "10:30"));
+        assert!(is_work_time(&t(9, 30), "09:30", "18:30"));
     }
     #[test]
     fn work_time_end_excl() {
-        assert!(!is_work_time(&t(10, 30), "01:30", "10:30"));
+        assert!(!is_work_time(&t(18, 30), "09:30", "18:30"));
     }
     #[test]
     fn work_time_before() {
-        assert!(!is_work_time(&t(0, 0), "01:30", "10:30"));
+        assert!(!is_work_time(&t(9, 29), "09:30", "18:30"));
     }
     #[test]
     fn work_time_after() {
-        assert!(!is_work_time(&t(12, 0), "01:30", "10:30"));
+        assert!(!is_work_time(&t(20, 0), "09:30", "18:30"));
     }
     #[test]
     fn work_time_bad_fmt() {
-        assert!(!is_work_time(&t(2, 0), "1:30am", "10:30"));
+        assert!(!is_work_time(&t(14, 0), "1:30am", "18:30"));
     }
     #[test]
     fn lunch_inside() {
-        assert!(is_lunch_window(&t(5, 0), "04:30", "05:30"));
+        assert!(is_lunch_window(&t(13, 0), "12:30", "13:30"));
     }
     #[test]
     fn lunch_start_incl() {
-        assert!(is_lunch_window(&t(4, 30), "04:30", "05:30"));
+        assert!(is_lunch_window(&t(12, 30), "12:30", "13:30"));
     }
     #[test]
     fn lunch_end_excl() {
-        assert!(!is_lunch_window(&t(5, 30), "04:30", "05:30"));
+        assert!(!is_lunch_window(&t(13, 30), "12:30", "13:30"));
     }
     #[test]
     fn lunch_outside() {
-        assert!(!is_lunch_window(&t(3, 0), "04:30", "05:30"));
+        assert!(!is_lunch_window(&t(11, 0), "12:30", "13:30"));
     }
     #[test]
     fn interval_range() {
@@ -1326,21 +1440,31 @@ mod tests {
     }
     #[test]
     fn ai_prompt_has_data() {
-        let p = build_ai_prompt(&st(3), false, 6);
-        assert!(p.contains("3") && p.contains("2000"));
+        let p = build_ai_prompt(&st(3), false, 6, &t(14, 0));
+        // Weak `contains("3")` matched too many substrings (e.g. "30ml", "3000").
+        // Anchor on the actual template: "已喝：3 口" and "目標 2000 ml".
+        assert!(
+            p.contains("已喝：3 口"),
+            "prompt should include 'already drank 3 cups': {p}"
+        );
+        assert!(
+            p.contains("2000 ml"),
+            "prompt should include goal '2000 ml': {p}"
+        );
     }
     #[test]
     fn ai_prompt_has_sips() {
-        let p = build_ai_prompt(&st(3), false, 6);
+        let p = build_ai_prompt(&st(3), false, 6, &t(14, 0));
         assert!(p.contains("6"));
     }
     #[test]
     fn ai_prompt_has_snooze() {
-        assert!(build_ai_prompt(&st(1), true, 5).contains("snooze"));
+        assert!(build_ai_prompt(&st(1), true, 5, &t(14, 0)).contains("snooze"));
     }
     #[test]
     fn ai_prompt_no_snooze() {
-        assert!(!build_ai_prompt(&st(1), false, 5).contains("（這是一次提醒後 snooze 的再次提醒）"));
+        assert!(!build_ai_prompt(&st(1), false, 5, &t(14, 0))
+            .contains("（這是一次提醒後 snooze 的再次提醒）"));
     }
     #[test]
     fn report_goal_has_streak() {
@@ -1352,7 +1476,12 @@ mod tests {
             current_streak: 3,
             last_goal_date: None,
         };
-        assert!(build_ai_report_prompt(&s, true).contains("3"));
+        let prompt = build_ai_report_prompt(&s, true);
+        // Weak `contains("3")` could match the drink_count/ml/date. Anchor on the streak phrase.
+        assert!(
+            prompt.contains("連續達標 3 天"),
+            "goal-reached report should include streak count: {prompt}"
+        );
     }
     #[test]
     fn report_no_goal_has_date() {
@@ -1368,26 +1497,26 @@ mod tests {
     }
     #[test]
     fn tc_morning() {
-        assert_eq!(TimeContext::from_time(&t(1, 30)), TimeContext::MorningStart);
-        assert_eq!(TimeContext::from_time(&t(2, 59)), TimeContext::MorningStart);
+        assert_eq!(TimeContext::from_time(&t(9, 30)), TimeContext::MorningStart);
+        assert_eq!(TimeContext::from_time(&t(10, 0)), TimeContext::MorningStart);
     }
     #[test]
     fn tc_midday() {
-        assert_eq!(TimeContext::from_time(&t(3, 0)), TimeContext::Midday);
+        assert_eq!(TimeContext::from_time(&t(12, 0)), TimeContext::Midday);
     }
     #[test]
     fn tc_afternoon() {
-        assert_eq!(TimeContext::from_time(&t(6, 0)), TimeContext::Afternoon);
+        assert_eq!(TimeContext::from_time(&t(15, 0)), TimeContext::Afternoon);
     }
     #[test]
     fn tc_closing() {
-        assert_eq!(TimeContext::from_time(&t(9, 0)), TimeContext::Closing);
-        assert_eq!(TimeContext::from_time(&t(10, 29)), TimeContext::Closing);
+        assert_eq!(TimeContext::from_time(&t(17, 0)), TimeContext::Closing);
+        assert_eq!(TimeContext::from_time(&t(18, 29)), TimeContext::Closing);
     }
     #[test]
     fn tc_outside() {
         assert_eq!(TimeContext::from_time(&t(0, 0)), TimeContext::Outside);
-        assert_eq!(TimeContext::from_time(&t(10, 30)), TimeContext::Outside);
+        assert_eq!(TimeContext::from_time(&t(18, 30)), TimeContext::Outside);
     }
     #[test]
     fn ml_consumed() {
@@ -1572,6 +1701,55 @@ mod tests {
         assert_eq!(
             h.get_scheduler_value("next_reminder").unwrap(),
             Some("9999".to_string())
+        );
+    }
+
+    #[test]
+    fn taipei_midnight_is_outside_work_hours() {
+        // 半夜 01:30 Taipei 不應在工作時段 — 這是原始 bug 的 regression test
+        assert!(!is_work_time(&t(1, 30), "09:30", "18:30"));
+    }
+
+    #[tokio::test]
+    async fn background_tick_returns_ok_outside_work_hours() {
+        // 07:00 Taipei is before work_start (09:30). background_tick should
+        // take the !in_work_hours early-return branch without setting any
+        // scheduler state or attempting reminders.
+        let clock: Arc<dyn super::Clock> = fake_clock_taipei(7, 0);
+        let h = hook_with_clock(clock);
+
+        let result = h.background_tick().await;
+        assert!(
+            result.is_ok(),
+            "tick outside work hours must succeed: {result:?}"
+        );
+
+        let fill_sent = h.get_scheduler_value("fill_bottle_today").ok().flatten();
+        assert!(
+            fill_sent.is_none(),
+            "outside work hours must not schedule fill-bottle reminder"
+        );
+
+        let next = h.get_scheduler_value("next_reminder").ok().flatten();
+        assert!(
+            next.is_none(),
+            "outside work hours must not schedule next_reminder"
+        );
+    }
+
+    #[tokio::test]
+    async fn background_tick_outside_report_window_does_not_mark_report_sent() {
+        // 17:00 Taipei is inside work hours but before work_end (18:30).
+        // The daily-report branch must not fire; report_sent_today stays unset.
+        let clock: Arc<dyn super::Clock> = fake_clock_taipei(17, 0);
+        let h = hook_with_clock(clock);
+
+        let _ = h.background_tick().await; // TG send may error with test http; we don't assert Ok here.
+
+        let report_sent = h.get_scheduler_value("report_sent_today").ok().flatten();
+        assert!(
+            report_sent.is_none(),
+            "report_sent_today must not be set before the 18:30 window"
         );
     }
 }
